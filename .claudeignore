@@ -1,0 +1,25 @@
+# Build artifacts
+target/
+
+# Local runtime data
+*.db
+*.db-shm
+*.db-wal
+
+# Secrets
+.env
+application-local.properties
+application-local.yml
+
+# IDE metadata
+.idea/
+.vscode/
+*.iml
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+logs/
