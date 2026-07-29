@@ -1,5 +1,6 @@
 package com.contextcompresso;
 
+import com.contextcompresso.config.CcrDataDirectoryInitializer;
 import org.springframework.boot.SpringApplication;
 import org.springframework.boot.autoconfigure.SpringBootApplication;
 import org.springframework.boot.context.properties.ConfigurationPropertiesScan;
@@ -10,6 +11,8 @@ import org.springframework.scheduling.annotation.EnableScheduling;
 @EnableScheduling
 public class ContextCompressoApplication {
     public static void main(String[] args) {
-        SpringApplication.run(ContextCompressoApplication.class, args);
+        SpringApplication app = new SpringApplication(ContextCompressoApplication.class);
+        app.addListeners(new CcrDataDirectoryInitializer());
+        app.run(args);
     }
 }
