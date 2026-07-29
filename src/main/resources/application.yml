@@ -1,0 +1,91 @@
+server:
+  port: 8080
+
+spring:
+  application:
+    name: contextcompresso
+  main:
+    web-application-type: reactive
+  datasource:
+    url: jdbc:sqlite:${contextcompresso.ccr.db-path}
+    driver-class-name: org.sqlite.JDBC
+  sql:
+    init:
+      mode: always
+      schema-locations: classpath:schema.sql
+  task:
+    scheduling:
+      pool:
+        size: 1
+
+contextcompresso:
+  providers:
+    copilot:
+      enabled: true
+      base-url: https://api.githubcopilot.com
+      api-style: openai
+      auth-type: github-token
+      max-context-tokens: 128000
+      token-estimator: jtokkit
+      forward-headers:
+        - Authorization
+        - X-GitHub-Token
+        - Editor-Version
+        - Copilot-Integration-Id
+      compression:
+        code-compression-enabled: true
+        strip-copilot-system-prompts: false
+        aggressive-code-strip: true
+
+    claude:
+      enabled: true
+      base-url: https://api.anthropic.com
+      api-style: anthropic
+      auth-type: api-key
+      max-context-tokens: 200000
+      token-estimator: anthropic
+      forward-headers:
+        - X-Api-Key
+        - Anthropic-Version
+        - Anthropic-Beta
+      compression:
+        code-compression-enabled: true
+        cache-alignment-enabled: true
+        preserve-cache-control-blocks: true
+
+    default:
+      enabled: true
+      base-url: https://api.openai.com
+      api-style: openai
+      auth-type: api-key
+      max-context-tokens: 128000
+      token-estimator: char-ratio
+      forward-headers:
+        - Authorization
+        - Content-Type
+
+  compression:
+    enabled: true
+    max-array-elements: 20
+    max-message-chars: 8000
+    text-truncation-enabled: true
+    truncation-head-sentences: 5
+    truncation-tail-sentences: 3
+    min-compress-chars: 200
+    dedup-window-ms: 2000
+
+  ccr:
+    enabled: true
+    db-path: ./data/ccr.db
+    retention-days: 30
+    min-original-chars: 200
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics
+
+logging:
+  level:
+    com.contextcompresso: INFO

@@ -1,26 +1,30 @@
 # ContextCompresso
 
-A lightweight Java proxy that compresses LLM context — tool outputs, logs, and conversation history — before sending to any AI API, cutting token usage without changing your existing code.
+A locally running, reactive Java proxy that sits between AI coding tools (GitHub Copilot, Claude Code) and their LLM APIs. It intercepts outgoing chat/completion payloads, compresses them to cut token usage, stores the originals for later retrieval, and forwards the compressed request upstream — transparently, with no changes to your IDE or CLI beyond a base-URL override.
 
 ## What it does
 
-ContextCompresso sits between your application and any LLM API (Claude, OpenAI, or any OpenAI-compatible endpoint). It intercepts outgoing requests, compresses the context, forwards the compressed version, and returns the response — transparently.
-
-Typical savings:
-- **60–95%** token reduction on JSON payloads (tool outputs, structured logs)
-- **15–20%** reduction on code and conversation history
-- Zero changes required to your existing LLM client code
+- **Detects the calling provider** (Copilot, Claude, or a generic OpenAI-compatible default) from headers or the request path, and applies provider-specific compression rules.
+- **Compresses JSON payloads**: prunes null/empty fields, deduplicates keys, collapses whitespace runs, and truncates oversized arrays.
+- **Strips code comments and blank-line bloat** from fenced code blocks and code content, with awareness of common languages so string literals containing `//` or `#` are never mistaken for comments.
+- **Truncates oversized text** (e.g. large tool outputs) using sentence-boundary-aware head+tail truncation, never mid-word or mid-sentence.
+- **Preserves what must never change**: Claude's `cache_control` blocks and message order (so Anthropic's prompt-cache prefix matching isn't broken), and Copilot's injected system prompts and `tool_calls`/`functions` structures.
+- **Stores original (uncompressed) content** in a local SQLite database (the "CCR" — Compressed Content Registry) so you can retrieve exactly what was sent before compression, per request or per message.
+- **Streams responses** (including SSE) straight through without buffering the whole body in memory.
+- **Fails open**: if compression ever throws, the original request is forwarded unmodified rather than blocking the call.
 
 ## How it works
 
 | Component | Role |
 |---|---|
-| `ProxyController` | HTTP proxy — receives requests, returns responses |
-| `SmartCrusher` | JSON compression — deduplicates keys, prunes nulls, truncates large arrays |
-| `CodeCompressor` | Strips comments and redundant whitespace from code blocks |
-| `TextTruncator` | Heuristic text shortening using sentence-boundary detection |
-| `CacheAligner` | Normalizes message prefix order to maximize LLM KV-cache hits |
-| `CcrStore` | SQLite-backed store — keeps originals for retrieval on demand |
+| `ProviderRouter` / `ProviderDetector` | Resolves which provider config applies to a request (`X-CC-Provider` header override → auth-header heuristics → path → default) |
+| `CompressionPipeline` | Orchestrates the stages below, provider-aware, fail-open |
+| `CacheAligner` | Normalizes message order — never reorders for Claude/Copilot system prompts, sorts by content hash for the generic default |
+| `SmartCrusher` | Structural JSON cleanup (null pruning, whitespace collapsing, array truncation) |
+| `CodeCompressor` | Strips comments/blank lines from code blocks, string-literal aware |
+| `TextTruncator` | Head+tail sentence truncation for oversized text, via `BreakIterator` |
+| `CcrStore` | SQLite-backed store of original content, keyed by request/message, with scheduled purge |
+| `ProxyController` | The actual HTTP proxy — `/v1/chat/completions`, `/v1/messages`, and a generic passthrough for everything else |
 
 ## Requirements
 
@@ -30,29 +34,77 @@ Typical savings:
 ## Getting started
 
 ```bash
-# Clone
-git clone git@github.com:vattitude-me/ContextCompresso.git
-cd ContextCompresso
-
 # Build
 mvn clean package
 
-# Run (defaults to port 8787)
+# Run (defaults to port 8080)
 java -jar target/contextcompresso.jar
 ```
 
-Point your LLM client at `http://localhost:8787` instead of the real API endpoint. No other changes needed.
+### Point Claude Code at it
+
+```bash
+export ANTHROPIC_BASE_URL=http://localhost:8080
+```
+
+### Point GitHub Copilot at it
+
+```json
+{
+  "github.copilot.advanced": {
+    "debug.overrideProxyUrl": "http://localhost:8080"
+  }
+}
+```
+
+No other client changes are needed — auth headers (`X-Api-Key`, `Authorization: Bearer ghp_...`) are forwarded upstream unchanged.
 
 ## Configuration
 
+Configuration lives in `src/main/resources/application.yml` under `contextcompresso.*`, or can be overridden with `--contextcompresso.some.property=value` / environment variables. Key settings:
+
 | Property | Default | Description |
 |---|---|---|
-| `server.port` | `8787` | Port the proxy listens on |
-| `compresso.target-url` | _(required)_ | The real LLM API base URL |
-| `compresso.ccr.enabled` | `true` | Store originals for retrieval |
-| `compresso.ccr.db-path` | `~/.compresso/ccr.db` | SQLite database path |
+| `server.port` | `8080` | Port the proxy listens on |
+| `contextcompresso.providers.copilot.base-url` | `https://api.githubcopilot.com` | Copilot upstream |
+| `contextcompresso.providers.claude.base-url` | `https://api.anthropic.com` | Claude upstream |
+| `contextcompresso.providers.default.base-url` | `https://api.openai.com` | Fallback upstream for any OpenAI-compatible endpoint |
+| `contextcompresso.compression.enabled` | `true` | Master switch for the compression pipeline |
+| `contextcompresso.compression.min-compress-chars` | `200` | Requests smaller than this pass through untouched |
+| `contextcompresso.ccr.enabled` | `true` | Store originals for retrieval |
+| `contextcompresso.ccr.db-path` | `./data/ccr.db` | SQLite database path |
+| `contextcompresso.ccr.retention-days` | `30` | Originals older than this are purged nightly at 2am |
 
-Set via `application.properties` or environment variables.
+See `PLAN-v1.md` for the full architecture and configuration reference.
+
+## Retrieving original (uncompressed) content
+
+Every proxied response carries an `X-CC-Request-Id` header. Use it to fetch what was actually sent before compression:
+
+```bash
+curl http://localhost:8080/ccr/request/<request-id>
+curl http://localhost:8080/ccr/<entry-id>
+```
+
+## Response headers
+
+Every compressed response includes:
+
+- `X-CC-Original-Chars` / `X-CC-Compressed-Chars` — character counts before/after compression
+- `X-CC-Ratio` — compressed/original ratio (< 1.0 means savings)
+- `X-CC-Request-Id` — UUID for CCR retrieval
+
+## Metrics
+
+Actuator is enabled at `/actuator/health`, `/actuator/info`, `/actuator/metrics`. Custom Micrometer metrics: `cc.requests.total`, `cc.compression.ratio`, `cc.chars.saved`, `cc.tokens.saved`, `cc.upstream.duration`, `cc.compression.skipped`, `cc.dedup.hits`.
+
+## Testing
+
+```bash
+mvn test
+```
+
+47 tests covering provider detection, each compression stage in isolation, token estimators, CCR storage, and full end-to-end proxy behavior (via MockWebServer) for Copilot-, Claude-, and generic-style requests — including that upstream actually receives a smaller body, the client actually receives the full upstream response body back, CCR entries are created, and fail-open behavior holds when compression is skipped.
 
 ## License
 
