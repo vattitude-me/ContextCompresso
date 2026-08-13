@@ -89,8 +89,9 @@ if "%CHOICE%"=="1" (
   where python >nul 2>&1
   if errorlevel 1 (
     echo !! python not found, couldn't auto-update .vscode\settings.json.
-    echo    Add this manually:
-    echo    "terminal.integrated.env.windows": { "ANTHROPIC_BASE_URL": "%BASE_URL%" }
+    echo    Add these manually to .vscode\settings.json:
+    echo    "terminal.integrated.env.windows": { "ANTHROPIC_BASE_URL": "%BASE_URL%" },
+    echo    "claudeCode.environmentVariables": { "ANTHROPIC_BASE_URL": "%BASE_URL%" }
   ) else (
     python "%~dp0update_vscode_settings.py" ".vscode\settings.json" "%BASE_URL%"
     echo ==^> Wrote ANTHROPIC_BASE_URL to .vscode\settings.json

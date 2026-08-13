@@ -1,12 +1,12 @@
-# ContextCompresso — Implementation Plan v1
+# ContextCompresso - Implementation Plan v1
 
 ## Project Overview
 
 ContextCompresso is a reactive Spring Boot proxy that sits between AI-powered IDE tools and LLM APIs. It intercepts requests, compresses message payloads to reduce token costs and latency, stores originals in SQLite for retrieval, and forwards compressed requests upstream.
 
-**Problem:** LLM API calls from developer tools (GitHub Copilot, Claude Code) often include redundant content — verbose tool results, commented code blocks, repeated JSON structures, and oversized file dumps. This inflates token usage (and cost) without improving response quality.
+**Problem:** LLM API calls from developer tools (GitHub Copilot, Claude Code) often include redundant content - verbose tool results, commented code blocks, repeated JSON structures, and oversized file dumps. This inflates token usage (and cost) without improving response quality.
 
-**Solution:** A transparent compression proxy that developers point their tools at. No code changes to the IDE or CLI — just a config change to route traffic through ContextCompresso.
+**Solution:** A transparent compression proxy that developers point their tools at. No code changes to the IDE or CLI - just a config change to route traffic through ContextCompresso.
 
 **Primary supported providers:**
 - **GitHub Copilot** (Copilot Chat API / OpenAI-compatible)
@@ -103,7 +103,7 @@ IDE integrations (especially Copilot) can fire duplicate requests on rapid keyst
 **Constraints:**
 - Copilot injects system prompts that MUST NOT be compressed (behavioral guardrails)
 - Function calling (`tool_calls`, `functions` arrays) must be preserved exactly
-- File snippets include line number prefixes — CodeCompressor must preserve these
+- File snippets include line number prefixes - CodeCompressor must preserve these
 - Detection: `Authorization: Bearer ghp_*` or presence of `Copilot-Integration-Id` header
 
 **Compression strategy:**
@@ -126,7 +126,7 @@ export ANTHROPIC_BASE_URL=http://localhost:8080
 
 **Constraints:**
 - `cache_control: {type: "ephemeral"}` on system messages must be preserved exactly
-- Tool results (file contents, grep output) are the prime compression target — often 10-50KB
+- Tool results (file contents, grep output) are the prime compression target - often 10-50KB
 - Extended thinking (`thinking` blocks in responses) pass through without modification
 - Anthropic's prompt caching is prefix-based: system prompt + first N messages must be byte-identical across requests for cache hits
 - CacheAligner must NOT reorder messages for Claude
@@ -422,11 +422,11 @@ contextcompresso/
 
 ### Pipeline Order
 
-1. **CacheAligner** — normalize message order (provider-specific)
-2. **SmartCrusher** — structural JSON cleanup
-3. **CodeCompressor** — strip comments, collapse whitespace in code
-4. **TextTruncator** — head+tail truncation for oversized content
-5. **CcrStore** — store originals, inject reference IDs
+1. **CacheAligner** - normalize message order (provider-specific)
+2. **SmartCrusher** - structural JSON cleanup
+3. **CodeCompressor** - strip comments, collapse whitespace in code
+4. **TextTruncator** - head+tail truncation for oversized content
+5. **CcrStore** - store originals, inject reference IDs
 
 ### SmartCrusher
 
@@ -497,7 +497,7 @@ public class CcrStore {
 }
 ```
 
-ID generation: `SHA-256(requestId + messageIdx + contentKey)` — deterministic and idempotent (`INSERT OR REPLACE`).
+ID generation: `SHA-256(requestId + messageIdx + contentKey)` - deterministic and idempotent (`INSERT OR REPLACE`).
 
 ### CcrController
 
@@ -548,10 +548,10 @@ public class ProxyController {
 **Streaming:** Detect `"stream": true` in request body. If streaming, pipe SSE chunks back as `text/event-stream` without buffering.
 
 **Response headers added:**
-- `X-CC-Original-Chars` — pre-compression character count
-- `X-CC-Compressed-Chars` — post-compression character count
-- `X-CC-Ratio` — compression ratio (< 1.0 means savings)
-- `X-CC-Request-Id` — UUID for CCR retrieval
+- `X-CC-Original-Chars` - pre-compression character count
+- `X-CC-Compressed-Chars` - post-compression character count
+- `X-CC-Ratio` - compression ratio (< 1.0 means savings)
+- `X-CC-Request-Id` - UUID for CCR retrieval
 
 ---
 
@@ -712,9 +712,9 @@ Phase 1 (Scaffold + Provider Config) ─── 1.5 days
 
 ## Future Considerations (Out of Scope for v1)
 
-- **Semantic compression** — using a smaller LLM to summarize tool results instead of truncating
-- **Per-model token budgets** — automatically compress to fit within a model's context window
-- **Multi-user support** — tenant isolation if deployed as a shared service
-- **PostgreSQL backend** — for higher-throughput deployments
-- **Compression analytics dashboard** — visualize savings over time per provider
-- **Plugin system** — allow custom compression stages via SPI
+- **Semantic compression** - using a smaller LLM to summarize tool results instead of truncating
+- **Per-model token budgets** - automatically compress to fit within a model's context window
+- **Multi-user support** - tenant isolation if deployed as a shared service
+- **PostgreSQL backend** - for higher-throughput deployments
+- **Compression analytics dashboard** - visualize savings over time per provider
+- **Plugin system** - allow custom compression stages via SPI

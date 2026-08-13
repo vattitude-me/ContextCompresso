@@ -12,6 +12,9 @@ for key in ("terminal.integrated.env.osx", "terminal.integrated.env.linux", "ter
     settings.setdefault(key, {})
     settings[key]["ANTHROPIC_BASE_URL"] = base_url
 
+settings.setdefault("claudeCode.environmentVariables", {})
+settings["claudeCode.environmentVariables"]["ANTHROPIC_BASE_URL"] = base_url
+
 with open(path, "w") as f:
     json.dump(settings, f, indent=2)
     f.write("\n")

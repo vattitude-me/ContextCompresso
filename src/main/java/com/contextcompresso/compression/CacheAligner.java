@@ -14,7 +14,7 @@ import java.util.List;
  * Provider-specific message ordering.
  *
  * Claude: Anthropic's prompt caching matches on exact byte prefix, so reordering
- * anything would destroy cache hits and increase cost — this mode is a pure no-op,
+ * anything would destroy cache hits and increase cost - this mode is a pure no-op,
  * deliberately, even though other providers benefit from reordering.
  *
  * Copilot: Copilot-injected system prompts (identified by their position: the leading

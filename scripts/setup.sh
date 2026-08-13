@@ -23,7 +23,7 @@ if ! command -v java >/dev/null 2>&1; then
 fi
 
 if ! java -version >/dev/null 2>&1; then
-  echo "!! 'java' is on PATH but doesn't run — this is usually the macOS stub launcher"
+  echo "!! 'java' is on PATH but doesn't run - this is usually the macOS stub launcher"
   echo "   shown when no JDK is registered with /usr/libexec/java_home, even if one is"
   echo "   installed via Homebrew and visible to 'mvn -version'."
   echo
@@ -71,7 +71,7 @@ done
 echo
 
 if [ "$UP" -ne 1 ]; then
-  echo "!! Timed out waiting for ${BASE_URL}/actuator/health — check contextcompresso.log"
+  echo "!! Timed out waiting for ${BASE_URL}/actuator/health - check contextcompresso.log"
   exit 1
 fi
 
