@@ -1,9 +1,9 @@
-# ContextCompresso v2 — Usage Telemetry & VS Code Dashboard
+# ContextCompresso v2 - Usage Telemetry & VS Code Dashboard
 
 ## Problem statement
 
 The team's constraint is a **credit bar metered on tokens**: input, output, cache-write, and
-cache-read all draw down the same budget. Credits drain fastest when agentic commands run —
+cache-read all draw down the same budget. Credits drain fastest when agentic commands run -
 file reads, greps, and command output get dumped into context and resent on every subsequent
 turn.
 
@@ -15,13 +15,13 @@ can see what a command actually cost and adjust before the budget is gone.
 
 ---
 
-## Phase 0 — Capture real usage (BLOCKING; everything depends on this)
+## Phase 0 - Capture real usage (BLOCKING; everything depends on this)
 
 ### The gap
 
 `ProxyController` streams the upstream response body directly to the client
-(`ProxyController.java:151-153`) without inspecting it. The provider's `usage` block —
-the authoritative record of what was billed — is never read.
+(`ProxyController.java:151-153`) without inspecting it. The provider's `usage` block -
+the authoritative record of what was billed - is never read.
 
 Consequence: every existing metric (`cc.compression.ratio`, `cc.chars.saved`) measures
 **characters removed from the request**. That is an estimate of savings. It is not cost.
@@ -54,7 +54,7 @@ OpenAI-style responses expose `usage.prompt_tokens` / `completion_tokens`, and
 
 ### Implementation: `UsageCapturingFilter`
 
-The response is a `Flux<DataBuffer>` and must **stay streaming** — buffering the whole body
+The response is a `Flux<DataBuffer>` and must **stay streaming** - buffering the whole body
 would break SSE and regress latency. Tap the stream instead of collecting it.
 
 **Non-streaming responses:** wrap the flux with `.doOnNext()` accumulating into a bounded
@@ -65,7 +65,7 @@ buffer (cap ~64KB; `usage` always appears well within that). Parse on completion
 `output_tokens`. Scan passing chunks for those event types rather than accumulating the
 whole stream.
 
-**Contract — identical to the compression pipeline's:** parsing is best-effort and fail-open.
+**Contract - identical to the compression pipeline's:** parsing is best-effort and fail-open.
 A malformed or absent `usage` block records nothing and must never disturb the response
 stream reaching the client.
 
@@ -93,7 +93,7 @@ CREATE INDEX IF NOT EXISTS idx_usage_created  ON usage_records(created_at);
 CREATE INDEX IF NOT EXISTS idx_usage_session  ON usage_records(session_key);
 ```
 
-`session_key` — hash of the first N messages, stable across turns within a conversation
+`session_key` - hash of the first N messages, stable across turns within a conversation
 (reuse `HashUtil`). Groups a session's requests without the proxy holding session state.
 
 ### Exit criteria
@@ -103,7 +103,7 @@ Copilot and Claude Code, with zero change to response latency or SSE behavior.
 
 ---
 
-## Phase 1 — Aggregation API
+## Phase 1 - Aggregation API
 
 Endpoints backing the dashboard. All read-only, all served off `boundedElastic` like the
 existing `CcrController`.
@@ -139,11 +139,11 @@ cache-weighted input, i.e. what the credit bar actually sees.
 effective = input + (cacheRead × 0.1) + (cacheWrite × 1.25)
 ```
 
-Weights configurable per provider — they are pricing constants, not physics, and will drift.
+Weights configurable per provider - they are pricing constants, not physics, and will drift.
 
 ---
 
-## Phase 2 — The VS Code dashboard
+## Phase 2 - The VS Code dashboard
 
 Design principle: **glanceable by default, detail on demand.** A developer mid-task will not
 open a panel. The status bar must carry the signal on its own.
@@ -154,9 +154,9 @@ open a panel. The status bar must carry the signal on its own.
 ◐ 94% cached · 106k eff · ▲3%
 ```
 
-- `94% cached` — cache hit rate. The single most actionable number: when it drops, cost spikes.
-- `106k eff` — effective input tokens this session (cache-weighted).
-- `▲3%` — trend vs. previous turn. Directional, catches runaway growth early.
+- `94% cached` - cache hit rate. The single most actionable number: when it drops, cost spikes.
+- `106k eff` - effective input tokens this session (cache-weighted).
+- `▲3%` - trend vs. previous turn. Directional, catches runaway growth early.
 
 Color thresholds: green ≥85% cached / amber 60–85% / red <60%.
 A sudden red is almost always a broken cache prefix, and that is worth interrupting for.
@@ -182,44 +182,44 @@ Top cost this session:
 ```
 
 The **top-cost list is the highest-value element in the whole design.** It converts
-"credits are draining" into "that recursive grep cost 18k tokens" — a specific,
+"credits are draining" into "that recursive grep cost 18k tokens" - a specific,
 changeable behavior. Everything else is context for this.
 
 ### Panel (webview, on click)
 
 Four sections, in priority order:
 
-1. **Now** — live token split (stacked bar), cache hit rate over the last 20 turns (sparkline)
-2. **Cost drivers** — ranked tool results / file reads by token cost, with a "compress this
+1. **Now** - live token split (stacked bar), cache hit rate over the last 20 turns (sparkline)
+2. **Cost drivers** - ranked tool results / file reads by token cost, with a "compress this
    aggressively" toggle per entry
-3. **Trend** — today's consumption by hour, split by model
-4. **Compression** — what the pipeline actually saved, honestly labelled as *estimated*
+3. **Trend** - today's consumption by hour, split by model
+4. **Compression** - what the pipeline actually saved, honestly labelled as *estimated*
    token savings vs. *measured* usage. Never conflate the two.
 
 ### Implementation notes
 
 - Poll `/stats/live` every ~3s while the panel is open; back off to 15s when it isn't.
-  Status bar polls at 5s. No websockets — not worth the complexity for this.
+  Status bar polls at 5s. No websockets - not worth the complexity for this.
 - Webview must respect VS Code theme tokens (`--vscode-*` CSS vars). A dashboard that
   ignores dark mode reads as broken.
 - Charts: hand-rolled inline SVG. No CDN (firewalled), and a charting library is a large
   dependency for four small visuals.
-- Degrade gracefully when the proxy is down — grey status bar, "proxy not running", one-click
+- Degrade gracefully when the proxy is down - grey status bar, "proxy not running", one-click
   restart. This will happen and should not look like a crash.
 
 ---
 
-## Phase 3 — Act on what the dashboard reveals
+## Phase 3 - Act on what the dashboard reveals
 
 Only build after Phase 2 has produced real data. The dashboard tells you which of these
-is actually worth it — do not guess now.
+is actually worth it - do not guess now.
 
 1. **Aggressive tool-result compaction.** Tool results sit *after* the cached prefix, so
    rewriting them does not invalidate cache. Highest-value compression target given that
    "commands eat credits fast."
 2. **Cache-prefix diagnostics.** Detect when a request's prefix diverges from the previous
    turn's and surface *why*. A broken prefix silently converts ~0.1x cache reads into 1x
-   fresh input — likely a bigger drain than anything compression recovers.
+   fresh input - likely a bigger drain than anything compression recovers.
 3. **Budget alerts.** Warn at a configurable effective-token threshold per session.
 4. **LLM summarization.** Last. Justify it against measured numbers from Phase 2, not
    intuition.
@@ -236,7 +236,7 @@ is actually worth it — do not guess now.
 | 3 | Targeted optimization | Directed by Phase 2 data |
 
 Phases 0–1 are backend-only and independently testable. Phase 2 is where the team sees
-anything, so it should not slip — but shipping it on estimated rather than measured numbers
+anything, so it should not slip - but shipping it on estimated rather than measured numbers
 would undermine trust in the tool permanently.
 
 ---

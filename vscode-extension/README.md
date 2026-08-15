@@ -21,7 +21,7 @@ This builds `contextcompresso.jar` from the parent Maven project, copies it into
 
 ## Running in development
 
-Open this directory in VS Code and press `F5` to launch an Extension Development Host with the extension loaded — no `.vsix` packaging needed for iterating locally.
+Open this directory in VS Code and press `F5` to launch an Extension Development Host with the extension loaded - no `.vsix` packaging needed for iterating locally.
 
 ## Configuration
 
