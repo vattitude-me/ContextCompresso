@@ -29,7 +29,8 @@ export function activate(context: vscode.ExtensionContext): void {
 
     context.subscriptions.push(
         vscode.commands.registerCommand('contextcompresso.showPanel', () => {
-            DashboardPanel.show(context, statsClient, proxyManager);
+            const extensionVersion = context.extension.packageJSON.version as string;
+            DashboardPanel.show(context, statsClient, proxyManager, extensionVersion);
         }),
         vscode.commands.registerCommand('contextcompresso.restart', async () => {
             await proxyManager.restart();

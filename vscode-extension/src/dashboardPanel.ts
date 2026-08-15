@@ -15,18 +15,19 @@ export class DashboardPanel {
     private pollHandle: ReturnType<typeof setInterval> | undefined;
     private disposables: vscode.Disposable[] = [];
 
-    static show(context: vscode.ExtensionContext, statsClient: StatsClient, proxyManager: ProxyManager): void {
+    static show(context: vscode.ExtensionContext, statsClient: StatsClient, proxyManager: ProxyManager, extensionVersion: string): void {
         if (DashboardPanel.current) {
             DashboardPanel.current.panel.reveal();
             return;
         }
-        DashboardPanel.current = new DashboardPanel(context, statsClient, proxyManager);
+        DashboardPanel.current = new DashboardPanel(context, statsClient, proxyManager, extensionVersion);
     }
 
     private constructor(
         private readonly context: vscode.ExtensionContext,
         private readonly statsClient: StatsClient,
-        private readonly proxyManager: ProxyManager
+        private readonly proxyManager: ProxyManager,
+        private readonly extensionVersion: string
     ) {
         this.panel = vscode.window.createWebviewPanel(
             'contextcompressoDashboard',
@@ -48,13 +49,15 @@ export class DashboardPanel {
     }
 
     private async refresh(): Promise<void> {
-        const [live, today, topCosts] = await Promise.all([
+        const [live, today, topCosts, proxyVersion] = await Promise.all([
             this.statsClient.fetchLive(),
             this.statsClient.fetchToday(),
-            this.statsClient.fetchTopCosts(8)
+            this.statsClient.fetchTopCosts(8),
+            this.statsClient.fetchVersion()
         ]);
         const proxyStatus = this.proxyManager.getStatus();
-        this.panel.webview.postMessage({ type: 'update', live, today, topCosts, proxyStatus });
+        const versions = { extension: this.extensionVersion, proxy: proxyVersion };
+        this.panel.webview.postMessage({ type: 'update', live, today, topCosts, proxyStatus, versions });
     }
 
     private dispose(): void {
@@ -107,10 +110,12 @@ export class DashboardPanel {
   }
   button:hover { background: var(--vscode-button-hoverBackground); }
   .sparkline { display: block; }
+  .version-footer { margin-top: 24px; font-size: 11px; color: var(--vscode-descriptionForeground); }
 </style>
 </head>
 <body>
   <div id="root">Loading…</div>
+  <div id="version-footer" class="version-footer"></div>
   <script>
     const vscode = acquireVsCodeApi();
     const root = document.getElementById('root');
@@ -175,8 +180,16 @@ export class DashboardPanel {
       return '<table><tbody>' + rows + '</tbody></table>';
     }
 
+    function renderVersionFooter(versions) {
+      if (!versions) return '';
+      const parts = ['Extension v' + versions.extension];
+      if (versions.proxy) parts.push('Proxy v' + versions.proxy);
+      return parts.join(' · ');
+    }
+
     function render(data) {
-      const { live, today, topCosts, proxyStatus } = data;
+      const { live, today, topCosts, proxyStatus, versions } = data;
+      document.getElementById('version-footer').textContent = renderVersionFooter(versions);
 
       if (!proxyStatus.running) {
         root.innerHTML =

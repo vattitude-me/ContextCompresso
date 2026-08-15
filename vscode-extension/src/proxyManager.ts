@@ -150,6 +150,9 @@ export class ProxyManager implements vscode.Disposable {
 
     async restart(): Promise<void> {
         await this.stop();
+        const config = vscode.workspace.getConfiguration('contextcompresso');
+        const preferredPort = config.get<number>('port', 8137);
+        await this.killWhateverIsOnPort(preferredPort);
         await this.start();
     }
 
@@ -265,6 +268,45 @@ export class ProxyManager implements vscode.Disposable {
             // process disappeared between the existence check and now — fine
         }
         this.clearPidFile();
+    }
+
+    /**
+     * "Restart Proxy" should mean the configured port is actually free afterward, even if
+     * something other than our tracked child (a leftover instance from a previous window, or
+     * an unrelated process) is squatting on it. stop() only kills this.process, so this closes
+     * the gap by finding and killing whatever the OS says owns the port right now.
+     */
+    private async killWhateverIsOnPort(port: number): Promise<void> {
+        try {
+            const pids = process.platform === 'win32'
+                ? this.findPidsOnPortWindows(port)
+                : cp.execFileSync('lsof', ['-nP', `-iTCP:${port}`, '-sTCP:LISTEN', '-t'], { encoding: 'utf8' })
+                    .split('\n').map((s) => parseInt(s.trim(), 10)).filter((n) => Number.isInteger(n));
+            for (const pid of pids) {
+                this.outputChannel.appendLine(`[info] killing process ${pid} occupying port ${port}`);
+                try {
+                    process.platform === 'win32'
+                        ? cp.execFileSync('taskkill', ['/PID', String(pid), '/F'])
+                        : process.kill(pid, 'SIGTERM');
+                } catch {
+                    // already gone — fine
+                }
+            }
+        } catch {
+            // lsof/netstat returns non-zero when nothing is listening — nothing to clean up
+        }
+    }
+
+    private findPidsOnPortWindows(port: number): number[] {
+        const out = cp.execFileSync('netstat', ['-ano', '-p', 'TCP'], { encoding: 'utf8' });
+        const pids = new Set<number>();
+        for (const line of out.split('\n')) {
+            const match = line.match(/^\s*TCP\s+\S*:(\d+)\s+\S+\s+LISTENING\s+(\d+)/);
+            if (match && parseInt(match[1], 10) === port) {
+                pids.add(parseInt(match[2], 10));
+            }
+        }
+        return [...pids];
     }
 
     /** Guards against killing an unrelated process whose PID was recycled after ours died. */

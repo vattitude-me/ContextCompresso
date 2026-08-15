@@ -57,4 +57,13 @@ public class StatsController {
                 .subscribeOn(Schedulers.boundedElastic())
                 .map(ResponseEntity::ok);
     }
+
+    @GetMapping("/version")
+    public ResponseEntity<VersionResponse> version() {
+        String version = getClass().getPackage().getImplementationVersion();
+        return ResponseEntity.ok(new VersionResponse(version != null ? version : "dev"));
+    }
+
+    public record VersionResponse(String version) {
+    }
 }

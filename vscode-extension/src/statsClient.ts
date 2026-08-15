@@ -70,6 +70,11 @@ export class StatsClient {
         return result ?? [];
     }
 
+    async fetchVersion(): Promise<string | null> {
+        const result = await this.getJson<{ version: string }>('/stats/version');
+        return result?.version ?? null;
+    }
+
     private getJson<T>(path: string): Promise<T | null> {
         const baseUrl = this.baseUrlProvider();
         if (!baseUrl) {
