@@ -1,6 +1,24 @@
 import * as vscode from 'vscode';
 
 /**
+ * Lets the dashboard tell "running but nothing routed through it yet" apart from "actually
+ * receiving traffic for some other reason" by checking whether either client's proxy setting
+ * currently points at the given base URL — read live so it stays correct if the user edits
+ * settings.json by hand instead of using the command.
+ */
+export function isClaudeCodeConfigured(baseUrl: string): boolean {
+    const vars = vscode.workspace.getConfiguration('claudeCode')
+        .get<{ name: string; value: string }[]>('environmentVariables', []);
+    return vars.some((v) => v.name === 'ANTHROPIC_BASE_URL' && v.value === baseUrl);
+}
+
+export function isCopilotConfigured(baseUrl: string): boolean {
+    const advanced = vscode.workspace.getConfiguration()
+        .get<Record<string, unknown>>('github.copilot.advanced', {});
+    return advanced['debug.overrideProxyUrl'] === baseUrl;
+}
+
+/**
  * Points GitHub Copilot's chat client at the local proxy via VS Code's own settings.json.
  * This is an undocumented `debug.*` override — Copilot may change or remove it in a future
  * release without notice, so this is offered as an explicit user action rather than

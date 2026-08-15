@@ -1,6 +1,8 @@
 import * as vscode from 'vscode';
 import { StatsClient, LiveStats, TodayStats, TopCostEntry } from './statsClient';
 import { ProxyManager } from './proxyManager';
+import { isClaudeCodeConfigured, isCopilotConfigured, configureClaudeCode, configureCopilot } from './clientConfig';
+import { BUILD_NUMBER } from './buildInfo';
 
 const POLL_MS_OPEN = 3000;
 
@@ -41,6 +43,18 @@ export class DashboardPanel {
         this.panel.webview.onDidReceiveMessage((message) => {
             if (message?.type === 'restart') {
                 void this.proxyManager.restart();
+            } else if (message?.type === 'configureClaudeCode') {
+                const baseUrl = this.proxyManager.getBaseUrl();
+                if (baseUrl) {
+                    void configureClaudeCode(baseUrl).then(() => this.refresh());
+                }
+            } else if (message?.type === 'configureCopilot') {
+                const baseUrl = this.proxyManager.getBaseUrl();
+                if (baseUrl) {
+                    void configureCopilot(baseUrl).then(() => this.refresh());
+                }
+            } else if (message?.type === 'openLogs') {
+                this.proxyManager.showLogs();
             }
         }, null, this.disposables);
 
@@ -56,8 +70,17 @@ export class DashboardPanel {
             this.statsClient.fetchVersion()
         ]);
         const proxyStatus = this.proxyManager.getStatus();
-        const versions = { extension: this.extensionVersion, proxy: proxyVersion };
-        this.panel.webview.postMessage({ type: 'update', live, today, topCosts, proxyStatus, versions });
+        const baseUrl = this.proxyManager.getBaseUrl();
+        const clients = baseUrl
+            ? { claudeCode: isClaudeCodeConfigured(baseUrl), copilot: isCopilotConfigured(baseUrl) }
+            : { claudeCode: false, copilot: false };
+        const versions = {
+            extension: this.extensionVersion,
+            extensionBuild: BUILD_NUMBER,
+            proxy: proxyVersion?.version ?? null,
+            proxyBuild: proxyVersion?.buildNumber ?? null
+        };
+        this.panel.webview.postMessage({ type: 'update', live, today, topCosts, proxyStatus, versions, clients });
     }
 
     private dispose(): void {
@@ -111,10 +134,32 @@ export class DashboardPanel {
   button:hover { background: var(--vscode-button-hoverBackground); }
   .sparkline { display: block; }
   .version-footer { margin-top: 24px; font-size: 11px; color: var(--vscode-descriptionForeground); }
+  .banner {
+    display: flex; align-items: center; justify-content: space-between; gap: 12px;
+    background: var(--vscode-inputValidation-infoBackground, var(--vscode-editorWidget-background));
+    border: 1px solid var(--vscode-inputValidation-infoBorder, var(--vscode-widget-border));
+    border-radius: 6px; padding: 10px 14px; margin-bottom: 16px; font-size: 12px;
+  }
+  .banner .actions { display: flex; gap: 8px; flex-shrink: 0; }
+  button.secondary {
+    background: transparent; color: var(--vscode-button-foreground, var(--vscode-foreground));
+    border: 1px solid var(--vscode-button-border, var(--vscode-widget-border));
+  }
+  button.secondary:hover { background: var(--vscode-button-secondaryHoverBackground, rgba(128,128,128,0.15)); }
+  .empty-state { text-align: center; padding: 32px 20px; }
+  .empty-state .icon { font-size: 28px; margin-bottom: 8px; }
+  .empty-state .title { font-size: 14px; font-weight: 600; margin-bottom: 6px; }
+  .empty-state .hint { color: var(--vscode-descriptionForeground); font-size: 12px; margin-bottom: 16px; }
+  .empty-state .actions { display: flex; gap: 8px; justify-content: center; flex-wrap: wrap; }
 </style>
 </head>
 <body>
-  <div id="root">Loading…</div>
+  <div id="root">
+    <div class="empty-state">
+      <div class="icon">⏳</div>
+      <div class="title">Connecting…</div>
+    </div>
+  </div>
   <div id="version-footer" class="version-footer"></div>
   <script>
     const vscode = acquireVsCodeApi();
@@ -182,30 +227,61 @@ export class DashboardPanel {
 
     function renderVersionFooter(versions) {
       if (!versions) return '';
-      const parts = ['Extension v' + versions.extension];
-      if (versions.proxy) parts.push('Proxy v' + versions.proxy);
+      const ext = 'Extension v' + versions.extension + (versions.extensionBuild ? ' (build ' + versions.extensionBuild + ')' : '');
+      const parts = [ext];
+      if (versions.proxy) {
+        parts.push('Proxy v' + versions.proxy + (versions.proxyBuild ? ' (build ' + versions.proxyBuild + ')' : ''));
+      }
       return parts.join(' · ');
     }
 
+    function renderNotRunning(proxyStatus) {
+      return '<div class="empty-state">' +
+        '<div class="icon">⚠️</div>' +
+        '<div class="title">Proxy not running</div>' +
+        '<div class="hint">' + (proxyStatus.lastError || 'Start it to begin capturing usage data.') + '</div>' +
+        '<div class="actions">' +
+        '<button id="restart-btn">Start / Restart Proxy</button>' +
+        '<button id="logs-btn" class="secondary">View Logs</button>' +
+        '</div></div>';
+    }
+
+    function renderSetupBanner(clients) {
+      if (clients.claudeCode || clients.copilot) return '';
+      return '<div class="banner">' +
+        '<span>Proxy is running, but no client is routed through it yet — usage will not appear until one is connected.</span>' +
+        '<span class="actions">' +
+        '<button id="wire-claude-btn">Connect Claude Code</button>' +
+        '<button id="wire-copilot-btn" class="secondary">Connect Copilot</button>' +
+        '</span></div>';
+    }
+
+    function renderConnectedBadge(clients) {
+      const connected = [];
+      if (clients.claudeCode) connected.push('Claude Code');
+      if (clients.copilot) connected.push('Copilot');
+      if (connected.length === 0) return '';
+      return '<div class="muted" style="margin-bottom:12px;font-size:11px;">Connected: ' + connected.join(', ') + '</div>';
+    }
+
     function render(data) {
-      const { live, today, topCosts, proxyStatus, versions } = data;
+      const { live, today, topCosts, proxyStatus, versions, clients } = data;
       document.getElementById('version-footer').textContent = renderVersionFooter(versions);
 
       if (!proxyStatus.running) {
-        root.innerHTML =
-          '<div class="card disconnected">' +
-          '<strong>Proxy not running.</strong><br/>' +
-          '<span class="muted">' + (proxyStatus.lastError || 'Start it to see usage data.') + '</span><br/><br/>' +
-          '<button id="restart-btn">Restart Proxy</button>' +
-          '</div>';
+        root.innerHTML = renderNotRunning(proxyStatus);
         document.getElementById('restart-btn')?.addEventListener('click', () => vscode.postMessage({ type: 'restart' }));
+        document.getElementById('logs-btn')?.addEventListener('click', () => vscode.postMessage({ type: 'openLogs' }));
         return;
       }
 
       const hasLive = live && live.turns > 0;
-      const cacheHitClass = hasLive && live.cacheHitRate < 0.6 ? 'warn' : '';
+      const hasAnyClient = clients && (clients.claudeCode || clients.copilot);
 
-      let html = '<h2>Now</h2>';
+      let html = renderSetupBanner(clients || { claudeCode: false, copilot: false });
+      html += renderConnectedBadge(clients || { claudeCode: false, copilot: false });
+
+      html += '<h2>Now</h2>';
       if (hasLive) {
         html += '<div class="row">' +
           '<div class="card"><div class="stat-value">' + pct(live.cacheHitRate) + '</div><div class="stat-label">cache hit rate</div>' +
@@ -213,8 +289,11 @@ export class DashboardPanel {
           '<div class="card"><div class="stat-value">' + fmt(live.effectiveInputTokens) + '</div><div class="stat-label">effective input tokens (this session)</div></div>' +
           '<div class="card"><div class="stat-value">' + live.turns + '</div><div class="stat-label">turns this session</div></div>' +
           '</div>';
+      } else if (!hasAnyClient) {
+        html += '<div class="card muted">Connect a client above to start seeing usage here.</div>';
       } else {
-        html += '<div class="card muted">No activity recorded yet this session.</div>';
+        html += '<div class="card muted">No activity recorded yet this session. Send a request through ' +
+          (clients.claudeCode ? 'Claude Code' : 'Copilot') + ' and this will update automatically.</div>';
       }
 
       html += '<h2>Cost drivers (today)</h2><div class="card">' + renderTopCosts(topCosts) + '</div>';
@@ -231,6 +310,8 @@ export class DashboardPanel {
       }
 
       root.innerHTML = html;
+      document.getElementById('wire-claude-btn')?.addEventListener('click', () => vscode.postMessage({ type: 'configureClaudeCode' }));
+      document.getElementById('wire-copilot-btn')?.addEventListener('click', () => vscode.postMessage({ type: 'configureCopilot' }));
     }
 
     window.addEventListener('message', (event) => {

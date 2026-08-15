@@ -13,7 +13,11 @@ import org.springframework.web.bind.annotation.RestController;
 import reactor.core.publisher.Mono;
 import reactor.core.scheduler.Schedulers;
 
+import java.io.IOException;
+import java.io.InputStream;
 import java.util.List;
+import java.util.jar.Attributes;
+import java.util.jar.Manifest;
 
 @RestController
 @RequestMapping("/stats")
@@ -61,9 +65,30 @@ public class StatsController {
     @GetMapping("/version")
     public ResponseEntity<VersionResponse> version() {
         String version = getClass().getPackage().getImplementationVersion();
-        return ResponseEntity.ok(new VersionResponse(version != null ? version : "dev"));
+        return ResponseEntity.ok(new VersionResponse(
+                version != null ? version : "dev",
+                readBuildNumber()));
     }
 
-    public record VersionResponse(String version) {
+    /**
+     * Implementation-Version is exposed via Package#getImplementationVersion(), but there's no
+     * standard accessor for arbitrary custom manifest entries, so Build-Number (set by build.sh
+     * via -Dbuild.number, see pom.xml) has to be read straight off the running jar's manifest.
+     */
+    private String readBuildNumber() {
+        try (InputStream in = getClass().getResourceAsStream("/META-INF/MANIFEST.MF")) {
+            if (in == null) {
+                return "0";
+            }
+            Manifest manifest = new Manifest(in);
+            Attributes attrs = manifest.getMainAttributes();
+            String buildNumber = attrs.getValue("Build-Number");
+            return buildNumber != null ? buildNumber : "0";
+        } catch (IOException e) {
+            return "0";
+        }
+    }
+
+    public record VersionResponse(String version, String buildNumber) {
     }
 }
