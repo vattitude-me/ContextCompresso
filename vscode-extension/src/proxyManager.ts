@@ -55,6 +55,8 @@ export class ProxyManager implements vscode.Disposable {
         }
         this.lastError = null;
 
+        await this.reapStaleProcess();
+
         const config = vscode.workspace.getConfiguration('contextcompresso');
         const jarPath = this.resolveJarPath(config.get<string>('jarPath', ''));
         if (!jarPath || !fs.existsSync(jarPath)) {
@@ -98,6 +100,8 @@ export class ProxyManager implements vscode.Disposable {
             `--contextcompresso.ccr.db-path=${path.join(dataDir, 'ccr.db')}`
         ], { stdio: ['ignore', 'pipe', 'pipe'] });
 
+        this.writePidFile(this.process.pid);
+
         this.process.stdout?.on('data', (chunk) => this.outputChannel.append(chunk.toString()));
         this.process.stderr?.on('data', (chunk) => {
             const text = chunk.toString();
@@ -109,6 +113,7 @@ export class ProxyManager implements vscode.Disposable {
         this.process.on('exit', (code) => {
             this.outputChannel.appendLine(`[info] proxy exited with code ${code}`);
             this.process = null;
+            this.clearPidFile();
             if (!portBindFailed) {
                 this.emitStatus();
             }
@@ -117,6 +122,7 @@ export class ProxyManager implements vscode.Disposable {
             this.lastError = `Failed to launch proxy: ${err.message}`;
             this.outputChannel.appendLine(`[error] ${this.lastError}`);
             this.process = null;
+            this.clearPidFile();
             this.emitStatus();
         });
 
@@ -138,6 +144,7 @@ export class ProxyManager implements vscode.Disposable {
             this.process.kill();
         }
         this.process = null;
+        this.clearPidFile();
         this.emitStatus();
     }
 
@@ -148,6 +155,7 @@ export class ProxyManager implements vscode.Disposable {
 
     dispose(): void {
         this.process?.kill();
+        this.clearPidFile();
         this.outputChannel.dispose();
     }
 
@@ -195,6 +203,80 @@ export class ProxyManager implements vscode.Disposable {
                 resolve(major === 1 ? parseInt(match[2] ?? '0', 10) : major);
             });
         });
+    }
+
+    private pidFilePath(): string {
+        return path.join(this.context.globalStorageUri.fsPath, 'proxy.pid');
+    }
+
+    private writePidFile(pid: number | undefined): void {
+        if (pid === undefined) {
+            return;
+        }
+        try {
+            fs.mkdirSync(this.context.globalStorageUri.fsPath, { recursive: true });
+            fs.writeFileSync(this.pidFilePath(), String(pid), 'utf8');
+        } catch {
+            // best-effort — losing the pid file just means we can't reap a stale process later
+        }
+    }
+
+    private clearPidFile(): void {
+        try {
+            fs.rmSync(this.pidFilePath(), { force: true });
+        } catch {
+            // best-effort
+        }
+    }
+
+    /**
+     * If a previous window's proxy never shut down cleanly (crash, force-quit, kill -9 on
+     * VS Code), its PID survives in globalStorage from that session. Killing it here — before
+     * spawning a new instance — closes the leak instead of leaving an orphaned JVM to squat on
+     * the port and relying on the ephemeral-port retry to paper over it.
+     */
+    private async reapStaleProcess(): Promise<void> {
+        let pidText: string;
+        try {
+            pidText = fs.readFileSync(this.pidFilePath(), 'utf8').trim();
+        } catch {
+            return;
+        }
+        const pid = parseInt(pidText, 10);
+        if (!Number.isInteger(pid) || pid <= 0) {
+            this.clearPidFile();
+            return;
+        }
+        try {
+            process.kill(pid, 0); // signal 0: test existence without killing
+        } catch {
+            this.clearPidFile(); // no such process — stale file from a clean-ish exit
+            return;
+        }
+        if (!this.looksLikeOurJar(pid)) {
+            // pid was recycled by an unrelated process since our process died — don't touch it
+            this.clearPidFile();
+            return;
+        }
+        this.outputChannel.appendLine(`[info] killing stale proxy process from a previous session (pid ${pid})`);
+        try {
+            process.kill(pid, 'SIGTERM');
+        } catch {
+            // process disappeared between the existence check and now — fine
+        }
+        this.clearPidFile();
+    }
+
+    /** Guards against killing an unrelated process whose PID was recycled after ours died. */
+    private looksLikeOurJar(pid: number): boolean {
+        try {
+            const cmd = process.platform === 'win32'
+                ? cp.execFileSync('wmic', ['process', 'where', `ProcessId=${pid}`, 'get', 'CommandLine'], { encoding: 'utf8' })
+                : cp.execFileSync('ps', ['-p', String(pid), '-o', 'command='], { encoding: 'utf8' });
+            return cmd.includes('contextcompresso.jar');
+        } catch {
+            return false;
+        }
     }
 
     private findFreePort(preferred: number): Promise<number> {
