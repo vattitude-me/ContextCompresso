@@ -5,7 +5,7 @@
 [![Java 17+](https://img.shields.io/badge/Java-17%2B-blue?logo=openjdk)](https://openjdk.org/)
 [![Spring Boot 3.2](https://img.shields.io/badge/Spring%20Boot-3.2-6DB33F?logo=springboot)](https://spring.io/projects/spring-boot)
 [![Maven](https://img.shields.io/badge/build-Maven-C71A36?logo=apachemaven)](https://maven.apache.org/)
-[![47 Tests](https://img.shields.io/badge/tests-47%20passing-brightgreen?logo=junit5)](./src/test)
+[![85 Tests](https://img.shields.io/badge/tests-85%20passing-brightgreen?logo=junit5)](./src/test)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue)](LICENSE)
 
 ContextCompresso sits between your AI coding tools (GitHub Copilot, Claude Code) and their LLM APIs. It intercepts outgoing chat/completion payloads, runs them through a multi-stage compression pipeline, stores the originals for later retrieval, and forwards the smaller request upstream - then streams the response back unchanged. The only configuration change you make is a single `base-url` override in your shell or workspace settings.
@@ -29,6 +29,8 @@ ContextCompresso sits between your AI coding tools (GitHub Copilot, Claude Code)
 - [Error Responses](#error-responses)
 - [CCR API](#ccr-api)
 - [Metrics](#metrics)
+- [Usage Stats API](#usage-stats-api)
+- [VS Code Extension](#vs-code-extension)
 - [Testing](#testing)
 - [Design Decisions Worth Noting](#design-decisions-worth-noting)
 
@@ -96,6 +98,10 @@ flowchart TD
 | 9 | **Request deduplication** | Caffeine window-cache short-circuits duplicate payloads within a 2-second window - prevents double-billing from rapid keystrokes or IDE retries |
 | 10 | **SSE streaming passthrough** | Detects `"stream": true` and pipes upstream event-stream chunks directly without buffering |
 | 11 | **Micrometer metrics** | Custom counters and timers for requests, compression ratio, chars/tokens saved, upstream duration, skipped compressions, and dedup hits |
+| 12 | **Tool-result compaction** | Line-based head+tail truncation for oversized `tool_result` blocks, independent of the general text truncator |
+| 13 | **Cache-prefix divergence detection** | Warns and increments a metric when a session's cached prompt prefix changes between turns, converting cheap cache reads back into full-price input tokens |
+| 14 | **Usage telemetry + stats API** | Captures `usage` data from upstream responses (streamed and non-streamed) and aggregates it per session, hour, and model via `/stats/*` |
+| 15 | **VS Code extension** | Runs the proxy for you and shows live cache-hit rate and effective token usage in the status bar and a dashboard webview |
 
 ---
 
@@ -111,9 +117,11 @@ flowchart TD
 | Tokenizer | jtokkit `CL100K_BASE` | Exact GPT-family token counts for Copilot; calibrated char-ratio heuristic for Claude |
 | Caching | Caffeine | Deduplication window cache, bounded to 10,000 entries |
 | Metrics | Micrometer + Spring Actuator | Exposed at `/actuator/metrics` |
-| Testing | JUnit 5, `reactor-test`, OkHttp `MockWebServer` | 47 tests; E2E proxy tests assert upstream body is smaller |
+| Testing | JUnit 5, `reactor-test`, OkHttp `MockWebServer` | 85 tests; E2E proxy tests assert upstream body is smaller |
 
 ---
+
+It also captures usage/cache telemetry from upstream responses and exposes it via a stats API, with an optional VS Code extension (`vscode-extension/`) that runs the proxy for you and surfaces live token/cache stats in a status bar item and dashboard.
 
 ## Requirements
 
@@ -280,7 +288,14 @@ All settings live in `src/main/resources/application.yml` under `contextcompress
 | `contextcompresso.ccr.db-path` | `./data/ccr.db` | SQLite database path |
 | `contextcompresso.ccr.retention-days` | `30` | Originals older than this are purged nightly at 2am |
 | `contextcompresso.ccr.min-original-chars` | `200` | Minimum character count for a message to be stored in CCR |
+| `contextcompresso.usage.cache-read-weight` | `0.1` | Weight applied to `cache_read_input_tokens` when computing effective cost |
+| `contextcompresso.usage.cache-write-weight` | `1.25` | Weight applied to `cache_creation_input_tokens` when computing effective cost |
+| `contextcompresso.usage.retention-days` | `30` | Usage records older than this are purged nightly at 2:15am |
+| `contextcompresso.compression.tool-result-compaction-enabled` | `true` | Head/tail line compaction of oversized `tool_result` blocks |
+| `contextcompresso.compression.max-tool-result-chars` | `2000` | Threshold above which a `tool_result` block is compacted |
 | `logging.level.com.contextcompresso` | `INFO` | Log verbosity for all proxy components |
+
+See [`docs/PLAN-v1.md`](docs/PLAN-v1.md) for the original architecture reference and [`docs/PLAN-v2-dashboard.md`](docs/PLAN-v2-dashboard.md) for the usage-telemetry/dashboard design.
 
 **Common runtime overrides:**
 
@@ -389,6 +404,7 @@ logging:
 | `SmartCrusher` | Null/empty field pruning, whitespace collapsing, array head+tail truncation with `[...truncated N elements...]` placeholder |
 | `CodeCompressor` | String-literal-aware comment/blank-line stripping for 13 languages; aggressive mode strips imports |
 | `TextTruncator` | `BreakIterator`-based head+tail sentence truncation for oversized text blocks |
+| `ToolResultCompactor` | Line-based head+tail truncation for oversized `tool_result` blocks specifically (tool output is naturally line-delimited, unlike prose) |
 | `RequestDeduplicator` | Caffeine window-cache (2s TTL, max 10,000 entries) short-circuits SHA-256-matched duplicate requests |
 | `CcrStore` | `JdbcTemplate`-backed SQLite repository; SHA-256 keyed entries; `INSERT OR REPLACE` semantics |
 | `CcrController` | `GET /ccr/{id}` and `GET /ccr/request/{requestId}` - original content retrieval |
@@ -396,6 +412,10 @@ logging:
 | `JtokkitEstimator` | Exact GPT token counts via jtokkit `CL100K_BASE` - used for Copilot |
 | `AnthropicEstimator` | Calibrated heuristic (`chars/3.2` prose, `chars/2.5` code) - used for Claude |
 | `CcrDataDirectoryInitializer` | `ApplicationEnvironmentPreparedEvent` listener that `mkdirs()` the SQLite parent before the DataSource bean wires up |
+| `UsageCapture` / `UsageExtractor` / `UsageStore` | Taps response bodies (including SSE) for `usage` data, parses it, persists per-session records |
+| `SessionKeyResolver` | Derives a stable session key from `system` + the first message, so it survives conversation growth |
+| `CachePrefixMonitor` | Compares the overlapping message range across turns to detect prompt-prefix divergence |
+| `StatsService` / `StatsController` | Aggregates `UsageRecord`s into live/today/top-cost views, exposed at `/stats/*` |
 
 ---
 
@@ -534,8 +554,36 @@ Spring Actuator is enabled at `/actuator/health`, `/actuator/info`, and `/actuat
 | `cc.upstream.duration` | Timer | Upstream API response time |
 | `cc.compression.skipped` | Counter | Requests below `min-compress-chars` |
 | `cc.dedup.hits` | Counter | Duplicate requests short-circuited |
+| `cc.cache.prefix.diverged` | Counter | Times a session's cache prefix was detected to have diverged between turns |
 
 > `/actuator/env`, `/actuator/beans`, and `/actuator/httptrace` are intentionally not exposed.
+
+---
+
+## Usage Stats API
+
+Every proxied request/response pair that includes an upstream `usage` block (Anthropic or OpenAI shape) is captured and aggregated:
+
+```bash
+curl -s http://localhost:8137/stats/live | jq               # latest session snapshot
+curl -s http://localhost:8137/stats/session/<key> | jq      # a specific session
+curl -s http://localhost:8137/stats/today | jq              # today, by hour and model
+curl -s http://localhost:8137/stats/top-costs?limit=10 | jq # most expensive sessions
+```
+
+Effective input cost weights `cache_read_input_tokens` and `cache_creation_input_tokens` differently from full-price `input_tokens` (see the `contextcompresso.usage.*` settings above), so the numbers reflect what Anthropic/OpenAI actually bill rather than raw token counts. Sessions are identified by hashing the system prompt plus the first message, so the key stays stable as a conversation grows.
+
+---
+
+## VS Code Extension
+
+[`vscode-extension/`](vscode-extension/) bundles the proxy jar and runs it for you - no separate `java -jar` step needed. It adds:
+
+- A status bar item showing live cache-hit rate and effective token usage, with a trend indicator; turns red below a 60% cache hit rate.
+- A dashboard webview (cost drivers, hourly trend, per-model breakdown, compression savings).
+- One-click commands to point Copilot or Claude Code's integrated terminal at the local proxy.
+
+Run `./build.sh` from that directory to build the jar, compile the extension, and (if [`vsce`](https://www.npmjs.com/package/@vscode/vsce) is installed) package a `.vsix`. See [`vscode-extension/README.md`](vscode-extension/README.md) for details.
 
 ---
 
@@ -545,21 +593,29 @@ Spring Actuator is enabled at `/actuator/health`, `/actuator/info`, and `/actuat
 mvn test
 ```
 
-47 tests across 11 classes:
+85 tests across 20 classes:
 
 | Class | Type | What it covers |
 |---|---|---|
 | `ProviderDetectorTest` | Unit | Auth-header heuristics, path fallback, `X-CC-Provider` override (6 tests) |
 | `CacheAlignerTest` | Unit | Claude no-op, Copilot locks system prompts, DEFAULT hoists+sorts, stable content hash (4 tests) |
 | `SmartCrusherTest` | Unit | Null/empty pruning, key dedup, array truncation sentinel, whitespace collapse (4 tests) |
-| `CodeCompressorTest` | Unit | Java block/inline comments, Python hash comments, `//` inside string literals, `#` inside string literals, unknown language passthrough, aggressive import strip (6 tests) |
+| `CodeCompressorTest` | Unit | Java block/inline comments, Python hash comments, `//` inside string literals, `#` inside string literals, unknown language passthrough, aggressive import strip (7 tests) |
 | `TextTruncatorTest` | Unit | Short text passthrough, head+sentinel+tail split, abbreviation handling, very long block (4 tests) |
+| `ToolResultCompactorTest` | Unit | Line-based head+tail compaction, short-content passthrough, single unbroken line left untouched (6 tests) |
 | `TokenEstimatorTest` | Unit | jtokkit exact count, jtokkit empty string, Anthropic prose ratio, Anthropic code ratio, char-ratio 4 chars/token (5 tests) |
 | `RequestDeduplicatorTest` | Unit | Same hash within window, different hashes pass through, TTL expiry (3 tests) |
 | `CcrStoreTest` | Unit | Store/findById, storeAll/findByRequestId, INSERT OR REPLACE idempotency, purge expired entries (4 tests) |
+| `SessionKeyResolverTest` | Unit | Stable key across conversation growth, distinct keys for distinct conversations (4 tests) |
+| `UsageExtractorTest` | Unit | Anthropic/OpenAI JSON and SSE usage parsing, cross-frame merging (7 tests) |
+| `UsageStoreTest` | Unit | Store/query by session, `findSince`, top-cost ordering, purge expired (5 tests) |
+| `CachePrefixMonitorTest` | Unit | First-seen, stable overlap across turns, divergence on edited prefix (5 tests) |
+| `StatsServiceTest` | Unit | Live/today/top-cost aggregation, cache-weighted effective cost (7 tests) |
 | `ClaudeProxyTest` | Integration | `cache_control` preserved, message order unchanged, `X-Api-Key` forwarded, large tool results truncated (4 tests) |
 | `CopilotProxyTest` | Integration | Copilot system prompts forwarded verbatim, `tool_calls` forwarded, `Authorization` header forwarded (3 tests) |
 | `EndToEndProxyTest` | Integration | Upstream receives smaller body, CCR entries written to SQLite, fail-open on empty body (3 tests) |
+| `ToolResultCompactionIntegrationTest` | Integration | Large `tool_result` compacted end-to-end, `tool_use`/`tool_result` pairing survives (2 tests) |
+| `UsageCaptureIntegrationTest` | Integration | Usage captured end-to-end from a mocked upstream, fail-open on malformed body (2 tests) |
 
 **Test infrastructure notes:**
 - Integration tests use `@SpringBootTest(webEnvironment = RANDOM_PORT)` with `MockWebServer` as the upstream
@@ -584,6 +640,10 @@ mvn test
 **`AnthropicEstimator` uses a content-aware char ratio.** Token estimation for Claude uses `chars/3.2` for prose and `chars/2.5` for code. "Looks like code" is determined by scanning the first 2,000 characters for structural tokens (`{`, `}`, `;`, `function`, `def `, `class `, `=>`, etc.) - if more than 1/40th of sampled characters match, it switches to the denser code ratio.
 
 **Deduplication is bounded and time-windowed.** The Caffeine dedup cache uses a 2-second TTL and a hard maximum of 10,000 entries. This prevents unbounded memory growth in long sessions while still catching the rapid-retry patterns IDEs exhibit.
+
+**Session keys hash only the system prompt and first message.** A stateless proxy has no session concept to draw on, so `SessionKeyResolver` derives one by hashing `system` + `messages[0]` only - not the whole history - since later message indices aren't stable across turns (index 1 is empty on turn 1, but holds the assistant's reply by turn 2). `CachePrefixMonitor` faces the same problem and solves it the same way: it compares only the message range that overlaps between two consecutive requests, so ordinary conversation growth is never mistaken for a cache-prefix divergence.
+
+**Tool-result compaction splits on lines, not sentences.** `TextTruncator`'s `BreakIterator`-based sentence splitting requires an uppercase letter after `". "` to register a boundary, which fails silently on tool output shaped like `"file.java:12: match. src/other.java:8: ..."` - a lowercase continuation collapses the whole block into one unsplittable "sentence." `ToolResultCompactor` sidesteps this by splitting on `\n` instead, which is both correct and simpler for content that's naturally line-delimited (grep dumps, stack traces, command output).
 
 ---
 

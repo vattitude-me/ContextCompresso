@@ -39,6 +39,7 @@ public class CompressionPipeline {
     private final SmartCrusher smartCrusher;
     private final CodeCompressor codeCompressor;
     private final TextTruncator textTruncator;
+    private final ToolResultCompactor toolResultCompactor;
     private final CcrStore ccrStore;
     private final CompressionProperties properties;
     private final MeterRegistry meterRegistry;
@@ -51,6 +52,7 @@ public class CompressionPipeline {
                                 SmartCrusher smartCrusher,
                                 CodeCompressor codeCompressor,
                                 TextTruncator textTruncator,
+                                ToolResultCompactor toolResultCompactor,
                                 CcrStore ccrStore,
                                 CompressionProperties properties,
                                 MeterRegistry meterRegistry,
@@ -62,6 +64,7 @@ public class CompressionPipeline {
         this.smartCrusher = smartCrusher;
         this.codeCompressor = codeCompressor;
         this.textTruncator = textTruncator;
+        this.toolResultCompactor = toolResultCompactor;
         this.ccrStore = ccrStore;
         this.properties = properties;
         this.meterRegistry = meterRegistry;
@@ -168,6 +171,10 @@ public class CompressionPipeline {
                 if (!(block instanceof ObjectNode blockObj)) {
                     continue;
                 }
+                if (isToolResult(blockObj) && properties.toolResultCompactionEnabled()) {
+                    compactToolResultBlock(blockObj, estimator, requestId, messageIdx, i, ccrEntries);
+                    continue;
+                }
                 // never touch cache_control-bearing blocks structurally beyond text compression
                 JsonNode textNode = blockObj.get("text");
                 if (textNode != null && textNode.isTextual()) {
@@ -180,6 +187,60 @@ public class CompressionPipeline {
                 }
             }
         }
+    }
+
+    private boolean isToolResult(JsonNode block) {
+        JsonNode type = block.get("type");
+        return type != null && "tool_result".equals(type.asText());
+    }
+
+    /**
+     * tool_result content is either a bare string or an array of {type:"text", text:...}
+     * blocks. Either way it sits after the cached system-prompt/early-turn prefix, so
+     * compacting it here does not invalidate Anthropic's prompt cache the way rewriting
+     * earlier messages would — this is the highest-value compression target for
+     * command-heavy sessions (grep dumps, file reads, test output).
+     */
+    private void compactToolResultBlock(ObjectNode blockObj, TokenEstimator estimator, String requestId,
+                                         int messageIdx, int blockIdx, List<CcrEntry> ccrEntries) {
+        JsonNode innerContent = blockObj.get("content");
+        if (innerContent == null) {
+            return;
+        }
+        int threshold = toolResultThresholdTokens();
+
+        if (innerContent.isTextual()) {
+            String original = innerContent.asText();
+            String compressed = toolResultCompactor.compact(original, threshold, estimator);
+            if (!compressed.equals(original)) {
+                recordCcr(requestId, messageIdx, "content[" + blockIdx + "].content", original, compressed, ccrEntries);
+            }
+            blockObj.set("content", new TextNode(compressed));
+        } else if (innerContent.isArray()) {
+            ArrayNode innerBlocks = (ArrayNode) innerContent;
+            for (int j = 0; j < innerBlocks.size(); j++) {
+                if (!(innerBlocks.get(j) instanceof ObjectNode innerObj)) {
+                    continue;
+                }
+                JsonNode textNode = innerObj.get("text");
+                if (textNode == null || !textNode.isTextual()) {
+                    continue;
+                }
+                String original = textNode.asText();
+                String compressed = toolResultCompactor.compact(original, threshold, estimator);
+                if (!compressed.equals(original)) {
+                    recordCcr(requestId, messageIdx,
+                            "content[" + blockIdx + "].content[" + j + "].text", original, compressed, ccrEntries);
+                }
+                innerObj.set("text", new TextNode(compressed));
+            }
+        }
+    }
+
+    private int toolResultThresholdTokens() {
+        // deliberately tighter than the general message threshold — tool output has no
+        // narrative structure worth preserving in the middle, unlike prose
+        return Math.max(properties.maxToolResultChars() / 4, 50);
     }
 
     private String compressText(String text, ProviderConfig config, TokenEstimator estimator) {

@@ -13,7 +13,7 @@ class SmartCrusherTest {
 
     private final ObjectMapper mapper = new ObjectMapper();
     private final SmartCrusher crusher = new SmartCrusher(
-            new CompressionProperties(true, 20, 8000, true, 5, 3, 200, 2000));
+            new CompressionProperties(true, 20, 8000, true, 5, 3, 200, 2000, true, 2000));
 
     @Test
     void prunesNullFields() {

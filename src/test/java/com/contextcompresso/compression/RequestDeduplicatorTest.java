@@ -11,7 +11,7 @@ class RequestDeduplicatorTest {
     @Test
     void sameHashWithinWindowReturnsCached() {
         RequestDeduplicator dedup = new RequestDeduplicator(
-                new CompressionProperties(true, 20, 8000, true, 5, 3, 200, 2000),
+                new CompressionProperties(true, 20, 8000, true, 5, 3, 200, 2000, true, 2000),
                 new SimpleMeterRegistry());
         String hash = dedup.hash("DEFAULT", "same body");
 
@@ -25,7 +25,7 @@ class RequestDeduplicatorTest {
     @Test
     void differentHashExecutesNormally() {
         RequestDeduplicator dedup = new RequestDeduplicator(
-                new CompressionProperties(true, 20, 8000, true, 5, 3, 200, 2000),
+                new CompressionProperties(true, 20, 8000, true, 5, 3, 200, 2000, true, 2000),
                 new SimpleMeterRegistry());
 
         var first = dedup.checkAndStore(dedup.hash("DEFAULT", "body a"), "DEFAULT", "result-a");
@@ -38,7 +38,7 @@ class RequestDeduplicatorTest {
     @Test
     void expiredEntriesEvictedAfterWindow() throws InterruptedException {
         RequestDeduplicator dedup = new RequestDeduplicator(
-                new CompressionProperties(true, 20, 8000, true, 5, 3, 200, 50),
+                new CompressionProperties(true, 20, 8000, true, 5, 3, 200, 50, true, 2000),
                 new SimpleMeterRegistry());
         String hash = dedup.hash("DEFAULT", "same body");
 

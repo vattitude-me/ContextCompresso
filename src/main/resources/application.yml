@@ -73,12 +73,20 @@ contextcompresso:
     truncation-tail-sentences: 3
     min-compress-chars: 200
     dedup-window-ms: 2000
+    tool-result-compaction-enabled: true
+    max-tool-result-chars: 2000
 
   ccr:
     enabled: true
     db-path: ./data/ccr.db
     retention-days: 30
     min-original-chars: 200
+
+  usage:
+    cache-read-weight: 0.1
+    cache-write-weight: 1.25
+    retention-days: 30
+    max-captured-response-bytes: 65536
 
 management:
   endpoints:

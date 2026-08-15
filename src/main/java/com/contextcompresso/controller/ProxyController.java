@@ -4,6 +4,13 @@ import com.contextcompresso.compression.CompressionPipeline;
 import com.contextcompresso.model.CompressedRequest;
 import com.contextcompresso.provider.ProviderConfig;
 import com.contextcompresso.provider.ProviderRouter;
+import com.contextcompresso.usage.CachePrefixMonitor;
+import com.contextcompresso.usage.SessionKeyResolver;
+import com.contextcompresso.usage.UsageCapture;
+import com.contextcompresso.usage.UsageExtractor;
+import com.contextcompresso.usage.UsageRecord;
+import com.contextcompresso.usage.UsageStore;
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.micrometer.core.instrument.MeterRegistry;
 import io.micrometer.core.instrument.Timer;
@@ -23,6 +30,7 @@ import org.springframework.web.reactive.function.client.WebClient;
 import org.springframework.web.reactive.function.client.WebClientResponseException;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
+import reactor.core.scheduler.Schedulers;
 
 import java.time.Duration;
 import java.util.List;
@@ -40,17 +48,26 @@ public class ProxyController {
     private final WebClient.Builder webClientBuilder;
     private final ObjectMapper objectMapper;
     private final MeterRegistry meterRegistry;
+    private final UsageCapture usageCapture;
+    private final UsageStore usageStore;
+    private final CachePrefixMonitor cachePrefixMonitor;
 
     public ProxyController(ProviderRouter providerRouter,
                             CompressionPipeline compressionPipeline,
                             WebClient.Builder webClientBuilder,
                             ObjectMapper objectMapper,
-                            MeterRegistry meterRegistry) {
+                            MeterRegistry meterRegistry,
+                            UsageCapture usageCapture,
+                            UsageStore usageStore,
+                            CachePrefixMonitor cachePrefixMonitor) {
         this.providerRouter = providerRouter;
         this.compressionPipeline = compressionPipeline;
         this.webClientBuilder = webClientBuilder;
         this.objectMapper = objectMapper;
         this.meterRegistry = meterRegistry;
+        this.usageCapture = usageCapture;
+        this.usageStore = usageStore;
+        this.cachePrefixMonitor = cachePrefixMonitor;
     }
 
     @PostMapping("/v1/chat/completions")
@@ -96,8 +113,17 @@ public class ProxyController {
             outboundBody = body;
         }
 
+        JsonNode requestRoot = parseQuietly(body);
+        String sessionKey = requestRoot == null ? null : SessionKeyResolver.resolve(requestRoot);
         String provider = config.name().name();
         meterRegistry.counter("cc.requests.total", "provider", provider, "status", "attempted").increment();
+
+        if (config.name() == com.contextcompresso.provider.Provider.CLAUDE && requestRoot != null) {
+            CachePrefixMonitor.PrefixCheck prefixCheck = cachePrefixMonitor.check(sessionKey, requestRoot);
+            if (prefixCheck.diverged()) {
+                meterRegistry.counter("cc.cache.prefix.diverged", "provider", provider).increment();
+            }
+        }
 
         WebClient client = webClientBuilder.build();
         WebClient.RequestBodySpec requestSpec = client.post()
@@ -125,8 +151,8 @@ public class ProxyController {
                                 .body(Flux.just(new org.springframework.core.io.buffer.DefaultDataBufferFactory()
                                         .wrap(e.getResponseBodyAsByteArray())))))
                 .map(upstreamResponse -> {
-                    sample.stop(meterRegistry.timer("cc.upstream.duration",
-                            "provider", provider, "streaming", String.valueOf(streaming)));
+                    long elapsedMs = sample.stop(meterRegistry.timer("cc.upstream.duration",
+                            "provider", provider, "streaming", String.valueOf(streaming))) / 1_000_000;
 
                     HttpStatus status = HttpStatus.resolve(upstreamResponse.getStatusCode().value());
                     HttpStatus resolvedStatus = status != null ? status : HttpStatus.BAD_GATEWAY;
@@ -148,8 +174,10 @@ public class ProxyController {
                     meterRegistry.counter("cc.requests.total", "provider", provider,
                             "status", String.valueOf(resolvedStatus.value())).increment();
 
-                    Flux<DataBuffer> responseBody = upstreamResponse.getBody() != null
+                    Flux<DataBuffer> upstreamBody = upstreamResponse.getBody() != null
                             ? upstreamResponse.getBody() : Flux.empty();
+                    Flux<DataBuffer> responseBody = usageCapture.tap(upstreamBody, streaming,
+                            usage -> recordUsage(requestId, sessionKey, provider, usage, compressed, elapsedMs));
                     return builder.body(responseBody);
                 })
                 .timeout(UPSTREAM_TIMEOUT)
@@ -159,6 +187,39 @@ public class ProxyController {
                     log.error("Upstream call failed for requestId={}", requestId, e);
                     return Mono.just(timeoutErrorResponse(requestId));
                 });
+    }
+
+    private JsonNode parseQuietly(String rawBody) {
+        if (rawBody == null || rawBody.isBlank()) {
+            return null;
+        }
+        try {
+            return objectMapper.readTree(rawBody);
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    private void recordUsage(String requestId, String sessionKey, String provider,
+                              UsageExtractor.ExtractedUsage usage, CompressedRequest compressed, long elapsedMs) {
+        if (usage.isEmpty()) {
+            return;
+        }
+        UsageRecord record = new UsageRecord(
+                requestId, sessionKey, provider, usage.model(),
+                usage.inputTokens(), usage.outputTokens(), usage.cacheReadTokens(), usage.cacheWriteTokens(),
+                compressed.stats().originalChars(), compressed.stats().compressedChars(),
+                elapsedMs, System.currentTimeMillis());
+
+        Mono.fromRunnable(() -> {
+                    try {
+                        usageStore.store(record);
+                    } catch (Exception e) {
+                        log.debug("Failed to persist usage record for requestId={} (fail-open)", requestId, e);
+                    }
+                })
+                .subscribeOn(Schedulers.boundedElastic())
+                .subscribe();
     }
 
     private ResponseEntity<Flux<DataBuffer>> timeoutErrorResponse(String requestId) {

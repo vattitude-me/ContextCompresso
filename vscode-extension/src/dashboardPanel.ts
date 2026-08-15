@@ -1,0 +1,232 @@
+import * as vscode from 'vscode';
+import { StatsClient, LiveStats, TodayStats, TopCostEntry } from './statsClient';
+import { ProxyManager } from './proxyManager';
+
+const POLL_MS_OPEN = 3000;
+
+/**
+ * The on-demand detail view. Kept deliberately simple: no chart library (this runs behind a
+ * firewall — no CDN, and pulling in a dependency for four small visuals isn't worth it),
+ * just inline SVG driven by VS Code's own theme tokens so it doesn't look broken in dark mode.
+ */
+export class DashboardPanel {
+    private static current: DashboardPanel | undefined;
+    private readonly panel: vscode.WebviewPanel;
+    private pollHandle: ReturnType<typeof setInterval> | undefined;
+    private disposables: vscode.Disposable[] = [];
+
+    static show(context: vscode.ExtensionContext, statsClient: StatsClient, proxyManager: ProxyManager): void {
+        if (DashboardPanel.current) {
+            DashboardPanel.current.panel.reveal();
+            return;
+        }
+        DashboardPanel.current = new DashboardPanel(context, statsClient, proxyManager);
+    }
+
+    private constructor(
+        private readonly context: vscode.ExtensionContext,
+        private readonly statsClient: StatsClient,
+        private readonly proxyManager: ProxyManager
+    ) {
+        this.panel = vscode.window.createWebviewPanel(
+            'contextcompressoDashboard',
+            'ContextCompresso Dashboard',
+            vscode.ViewColumn.Beside,
+            { enableScripts: true, retainContextWhenHidden: true }
+        );
+        this.panel.webview.html = this.renderShell();
+
+        this.panel.onDidDispose(() => this.dispose(), null, this.disposables);
+        this.panel.webview.onDidReceiveMessage((message) => {
+            if (message?.type === 'restart') {
+                void this.proxyManager.restart();
+            }
+        }, null, this.disposables);
+
+        void this.refresh();
+        this.pollHandle = setInterval(() => void this.refresh(), POLL_MS_OPEN);
+    }
+
+    private async refresh(): Promise<void> {
+        const [live, today, topCosts] = await Promise.all([
+            this.statsClient.fetchLive(),
+            this.statsClient.fetchToday(),
+            this.statsClient.fetchTopCosts(8)
+        ]);
+        const proxyStatus = this.proxyManager.getStatus();
+        this.panel.webview.postMessage({ type: 'update', live, today, topCosts, proxyStatus });
+    }
+
+    private dispose(): void {
+        DashboardPanel.current = undefined;
+        if (this.pollHandle) {
+            clearInterval(this.pollHandle);
+        }
+        this.disposables.forEach((d) => d.dispose());
+    }
+
+    private renderShell(): string {
+        return /* html */ `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<style>
+  body {
+    font-family: var(--vscode-font-family);
+    color: var(--vscode-foreground);
+    background: var(--vscode-editor-background);
+    padding: 16px 20px;
+  }
+  h2 { font-size: 13px; text-transform: uppercase; letter-spacing: 0.05em;
+       color: var(--vscode-descriptionForeground); margin: 24px 0 10px; }
+  h2:first-child { margin-top: 0; }
+  .card {
+    background: var(--vscode-sideBar-background, var(--vscode-editorWidget-background));
+    border: 1px solid var(--vscode-widget-border, transparent);
+    border-radius: 6px;
+    padding: 14px 16px;
+    margin-bottom: 8px;
+  }
+  .row { display: flex; gap: 12px; }
+  .row > .card { flex: 1; }
+  .stat-value { font-size: 22px; font-weight: 600; }
+  .stat-label { font-size: 11px; color: var(--vscode-descriptionForeground); margin-top: 2px; }
+  table { width: 100%; border-collapse: collapse; font-size: 12px; }
+  td, th { text-align: left; padding: 4px 6px; }
+  th { color: var(--vscode-descriptionForeground); font-weight: 500; }
+  tr:not(:last-child) td { border-bottom: 1px solid var(--vscode-widget-border, rgba(128,128,128,0.15)); }
+  .bar-track { background: var(--vscode-input-background); border-radius: 3px; height: 8px; overflow: hidden; }
+  .bar-fill { height: 100%; background: var(--vscode-charts-blue, #3794ff); }
+  .bar-fill.warn { background: var(--vscode-charts-orange, #e2a336); }
+  .num { text-align: right; font-variant-numeric: tabular-nums; }
+  .muted { color: var(--vscode-descriptionForeground); }
+  .disconnected { color: var(--vscode-errorForeground); }
+  button {
+    background: var(--vscode-button-background); color: var(--vscode-button-foreground);
+    border: none; padding: 5px 12px; border-radius: 3px; cursor: pointer; font-size: 12px;
+  }
+  button:hover { background: var(--vscode-button-hoverBackground); }
+  .sparkline { display: block; }
+</style>
+</head>
+<body>
+  <div id="root">Loading…</div>
+  <script>
+    const vscode = acquireVsCodeApi();
+    const root = document.getElementById('root');
+
+    function fmt(n) {
+      if (n === null || n === undefined) return '—';
+      if (n >= 1_000_000) return (n / 1_000_000).toFixed(1) + 'm';
+      if (n >= 1_000) return (n / 1_000).toFixed(1) + 'k';
+      return String(Math.round(n));
+    }
+    function pct(n) { return Math.round(n * 100) + '%'; }
+
+    function renderBar(value, max, warn) {
+      const width = max > 0 ? Math.min(100, (value / max) * 100) : 0;
+      const cls = warn ? 'bar-fill warn' : 'bar-fill';
+      return '<div class="bar-track"><div class="' + cls + '" style="width:' + width + '%"></div></div>';
+    }
+
+    function renderSparkline(hourBuckets) {
+      const w = 320, h = 48, pad = 4;
+      if (!hourBuckets || hourBuckets.length === 0) {
+        return '<div class="muted">No activity yet today.</div>';
+      }
+      const max = Math.max(...hourBuckets.map(b => b.effectiveInputTokens), 1);
+      const stepX = (w - pad * 2) / Math.max(hourBuckets.length - 1, 1);
+      const points = hourBuckets.map((b, i) => {
+        const x = pad + i * stepX;
+        const y = h - pad - ((b.effectiveInputTokens / max) * (h - pad * 2));
+        return x + ',' + y;
+      }).join(' ');
+      return '<svg class="sparkline" width="' + w + '" height="' + h + '" viewBox="0 0 ' + w + ' ' + h + '">' +
+        '<polyline points="' + points + '" fill="none" stroke="var(--vscode-charts-blue, #3794ff)" stroke-width="2"/>' +
+        '</svg>';
+    }
+
+    function renderTopCosts(entries) {
+      if (!entries || entries.length === 0) {
+        return '<div class="muted">No requests recorded today.</div>';
+      }
+      const max = Math.max(...entries.map(e => e.effectiveInputTokens));
+      const rows = entries.map((e, i) => {
+        const time = new Date(e.createdAt).toLocaleTimeString();
+        return '<tr>' +
+          '<td>' + (i + 1) + '</td>' +
+          '<td>' + (e.model || e.provider) + '</td>' +
+          '<td class="muted">' + time + '</td>' +
+          '<td style="width:35%">' + renderBar(e.effectiveInputTokens, max, false) + '</td>' +
+          '<td class="num">' + fmt(e.effectiveInputTokens) + '</td>' +
+          '</tr>';
+      }).join('');
+      return '<table><thead><tr><th></th><th>Model</th><th>When</th><th></th><th class="num">Effective tokens</th></tr></thead><tbody>' + rows + '</tbody></table>';
+    }
+
+    function renderModelBreakdown(byModel) {
+      if (!byModel || byModel.length === 0) return '<div class="muted">No data yet.</div>';
+      const max = Math.max(...byModel.map(m => m.effectiveInputTokens));
+      const rows = byModel.map(m =>
+        '<tr><td>' + m.model + '</td><td class="muted">' + m.requestCount + ' reqs</td>' +
+        '<td style="width:40%">' + renderBar(m.effectiveInputTokens, max, false) + '</td>' +
+        '<td class="num">' + fmt(m.effectiveInputTokens) + '</td></tr>'
+      ).join('');
+      return '<table><tbody>' + rows + '</tbody></table>';
+    }
+
+    function render(data) {
+      const { live, today, topCosts, proxyStatus } = data;
+
+      if (!proxyStatus.running) {
+        root.innerHTML =
+          '<div class="card disconnected">' +
+          '<strong>Proxy not running.</strong><br/>' +
+          '<span class="muted">' + (proxyStatus.lastError || 'Start it to see usage data.') + '</span><br/><br/>' +
+          '<button id="restart-btn">Restart Proxy</button>' +
+          '</div>';
+        document.getElementById('restart-btn')?.addEventListener('click', () => vscode.postMessage({ type: 'restart' }));
+        return;
+      }
+
+      const hasLive = live && live.turns > 0;
+      const cacheHitClass = hasLive && live.cacheHitRate < 0.6 ? 'warn' : '';
+
+      let html = '<h2>Now</h2>';
+      if (hasLive) {
+        html += '<div class="row">' +
+          '<div class="card"><div class="stat-value">' + pct(live.cacheHitRate) + '</div><div class="stat-label">cache hit rate</div>' +
+          renderBar(live.cacheHitRate, 1, live.cacheHitRate < 0.6) + '</div>' +
+          '<div class="card"><div class="stat-value">' + fmt(live.effectiveInputTokens) + '</div><div class="stat-label">effective input tokens (this session)</div></div>' +
+          '<div class="card"><div class="stat-value">' + live.turns + '</div><div class="stat-label">turns this session</div></div>' +
+          '</div>';
+      } else {
+        html += '<div class="card muted">No activity recorded yet this session.</div>';
+      }
+
+      html += '<h2>Cost drivers (today)</h2><div class="card">' + renderTopCosts(topCosts) + '</div>';
+
+      html += '<h2>Trend (today, by hour)</h2><div class="card">' + renderSparkline(today ? today.byHour : []) + '</div>';
+
+      html += '<h2>By model (today)</h2><div class="card">' + renderModelBreakdown(today ? today.byModel : []) + '</div>';
+
+      if (hasLive) {
+        html += '<h2>Compression</h2><div class="card">' +
+          '<span class="stat-value">' + pct(live.compression.ratio) + '</span> ' +
+          '<span class="muted">of request characters kept (estimated savings — not the same as measured token usage above)</span>' +
+          '</div>';
+      }
+
+      root.innerHTML = html;
+    }
+
+    window.addEventListener('message', (event) => {
+      if (event.data?.type === 'update') {
+        render(event.data);
+      }
+    });
+  </script>
+</body>
+</html>`;
+    }
+}

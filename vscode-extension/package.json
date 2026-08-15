@@ -1,0 +1,72 @@
+{
+  "name": "contextcompresso",
+  "displayName": "ContextCompresso",
+  "description": "Local token-usage dashboard and compression proxy for Copilot and Claude Code",
+  "version": "0.1.0",
+  "publisher": "contextcompresso",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": ["Other"],
+  "activationEvents": ["onStartupFinished"],
+  "main": "./out/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "contextcompresso.showPanel",
+        "title": "ContextCompresso: Show Usage Dashboard"
+      },
+      {
+        "command": "contextcompresso.restart",
+        "title": "ContextCompresso: Restart Proxy"
+      },
+      {
+        "command": "contextcompresso.configureCopilot",
+        "title": "ContextCompresso: Point GitHub Copilot at Proxy"
+      },
+      {
+        "command": "contextcompresso.configureClaudeCode",
+        "title": "ContextCompresso: Point Claude Code at Proxy"
+      },
+      {
+        "command": "contextcompresso.openLogs",
+        "title": "ContextCompresso: Open Proxy Logs"
+      }
+    ],
+    "configuration": {
+      "title": "ContextCompresso",
+      "properties": {
+        "contextcompresso.jarPath": {
+          "type": "string",
+          "default": "",
+          "description": "Path to contextcompresso.jar. Leave empty to use the jar bundled with this extension."
+        },
+        "contextcompresso.port": {
+          "type": "number",
+          "default": 8137,
+          "description": "Port the local proxy listens on."
+        },
+        "contextcompresso.autoStart": {
+          "type": "boolean",
+          "default": true,
+          "description": "Start the proxy automatically when VS Code opens."
+        },
+        "contextcompresso.javaPath": {
+          "type": "string",
+          "default": "",
+          "description": "Path to a Java 17+ executable. Leave empty to auto-detect (JAVA_HOME, then PATH)."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "package": "vsce package"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "@types/vscode": "^1.85.0",
+    "typescript": "^5.4.0"
+  }
+}

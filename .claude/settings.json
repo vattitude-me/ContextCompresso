@@ -3,17 +3,17 @@
     "allow": [
       "Bash(*)",
       "Read(*)",
-      "Edit(*)",
       "Write(*)",
+      "Edit(*)",
       "Glob(*)",
       "Grep(*)"
     ],
-    "deny": [
+    "ask": [
       "Bash(rm *)",
-      "Bash(rm -rf *)",
       "Bash(del *)",
-      "Bash(git push origin*)",
-      "Bash(git push --force*)"
+      "Bash(Remove-Item *)",
+      "Bash(git push*)",
+      "Bash(git push *)"
     ]
   }
 }

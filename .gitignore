@@ -26,6 +26,10 @@ buildNumber.properties
 *.zip
 *.tar.gz
 *.rar
+*.vsix
+
+# Node (vscode-extension/)
+node_modules/
 
 # IDE - IntelliJ
 .idea/
