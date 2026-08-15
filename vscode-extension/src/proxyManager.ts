@@ -73,6 +73,17 @@ export class ProxyManager implements vscode.Disposable {
         }
 
         const preferredPort = config.get<number>('port', 8137);
+        const started = await this.spawnAndWait(javaPath, jarPath, preferredPort);
+        if (!started && preferredPort !== 0) {
+            // The port we probed as free lost the race before the JVM could bind it
+            // (e.g. a leftover instance from a previous window grabbed it first).
+            // Retry once on an OS-assigned ephemeral port rather than surfacing the failure.
+            this.outputChannel.appendLine('[info] retrying on an ephemeral port after bind failure');
+            await this.spawnAndWait(javaPath, jarPath, 0);
+        }
+    }
+
+    private async spawnAndWait(javaPath: string, jarPath: string, preferredPort: number): Promise<boolean> {
         const port = await this.findFreePort(preferredPort);
         this.resolvedPort = port;
 
@@ -80,6 +91,7 @@ export class ProxyManager implements vscode.Disposable {
         const dataDir = path.join(this.context.globalStorageUri.fsPath, 'data');
         fs.mkdirSync(dataDir, { recursive: true });
 
+        let portBindFailed = false;
         this.process = cp.spawn(javaPath, [
             '-jar', jarPath,
             `--server.port=${port}`,
@@ -87,11 +99,19 @@ export class ProxyManager implements vscode.Disposable {
         ], { stdio: ['ignore', 'pipe', 'pipe'] });
 
         this.process.stdout?.on('data', (chunk) => this.outputChannel.append(chunk.toString()));
-        this.process.stderr?.on('data', (chunk) => this.outputChannel.append(chunk.toString()));
+        this.process.stderr?.on('data', (chunk) => {
+            const text = chunk.toString();
+            this.outputChannel.append(text);
+            if (text.includes('already in use')) {
+                portBindFailed = true;
+            }
+        });
         this.process.on('exit', (code) => {
             this.outputChannel.appendLine(`[info] proxy exited with code ${code}`);
             this.process = null;
-            this.emitStatus();
+            if (!portBindFailed) {
+                this.emitStatus();
+            }
         });
         this.process.on('error', (err) => {
             this.lastError = `Failed to launch proxy: ${err.message}`;
@@ -103,10 +123,14 @@ export class ProxyManager implements vscode.Disposable {
         this.emitStatus();
         const healthy = await this.waitForHealth(port, 30_000);
         if (!healthy) {
+            if (portBindFailed) {
+                return false;
+            }
             this.lastError = 'Proxy did not become healthy within 30s. Check ContextCompresso output for details.';
             this.outputChannel.appendLine(`[error] ${this.lastError}`);
         }
         this.emitStatus();
+        return healthy;
     }
 
     async stop(): Promise<void> {
@@ -185,7 +209,8 @@ export class ProxyManager implements vscode.Disposable {
                 });
             });
             tester.once('listening', () => {
-                tester.close(() => resolve(preferred));
+                const assigned = (tester.address() as net.AddressInfo).port;
+                tester.close(() => resolve(assigned));
             });
             tester.listen(preferred, '127.0.0.1');
         });
