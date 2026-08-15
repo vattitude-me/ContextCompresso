@@ -20,30 +20,27 @@ export async function configureCopilot(baseUrl: string): Promise<void> {
 }
 
 /**
- * Claude Code reads ANTHROPIC_BASE_URL from the environment, not from VS Code settings —
- * there is no API for an extension to set process-level env vars for external terminals or
- * the Claude Code CLI itself. The most reliable thing this extension can do is set it for
- * VS Code's own integrated terminal profile and tell the user explicitly what changed.
+ * The Claude Code VS Code extension (anthropic.claude-code) spawns its own native `claude`
+ * binary directly from the extension host process — not from a VS Code integrated terminal —
+ * so `terminal.integrated.env.*` settings never reach it. It builds that child's environment
+ * from `{...process.env}` overlaid with its own `claudeCode.environmentVariables` setting, so
+ * that's the one place we can reliably inject ANTHROPIC_BASE_URL for this entrypoint. This
+ * takes effect on the next `claude` invocation with no VS Code restart required.
  */
 export async function configureClaudeCode(baseUrl: string): Promise<void> {
-    const config = vscode.workspace.getConfiguration();
-    const envKey = process.platform === 'win32'
-        ? 'terminal.integrated.env.windows'
-        : process.platform === 'darwin'
-            ? 'terminal.integrated.env.osx'
-            : 'terminal.integrated.env.linux';
-
-    const existingEnv = config.get<Record<string, string>>(envKey, {});
-    await config.update(envKey, {
-        ...existingEnv,
-        ANTHROPIC_BASE_URL: baseUrl
-    }, vscode.ConfigurationTarget.Global);
+    const config = vscode.workspace.getConfiguration('claudeCode');
+    const existingVars = config.get<{ name: string; value: string }[]>('environmentVariables', []);
+    const withoutOldBaseUrl = existingVars.filter((v) => v.name !== 'ANTHROPIC_BASE_URL');
+    await config.update('environmentVariables', [
+        ...withoutOldBaseUrl,
+        { name: 'ANTHROPIC_BASE_URL', value: baseUrl }
+    ], vscode.ConfigurationTarget.Global);
 
     const choice = await vscode.window.showInformationMessage(
-        `Set ANTHROPIC_BASE_URL=${baseUrl} for new integrated terminals. Existing terminals need to be restarted, and any shell you launch outside VS Code needs 'export ANTHROPIC_BASE_URL=${baseUrl}' manually.`,
-        'Copy export command'
+        `Set claudeCode.environmentVariables so Claude Code (VS Code extension) routes through ContextCompresso (${baseUrl}). Takes effect on the next Claude Code request in this window. For the Claude Code CLI run outside VS Code, export ANTHROPIC_BASE_URL=${baseUrl} in your shell instead.`,
+        'Copy export command (CLI)'
     );
-    if (choice === 'Copy export command') {
+    if (choice === 'Copy export command (CLI)') {
         await vscode.env.clipboard.writeText(`export ANTHROPIC_BASE_URL=${baseUrl}`);
     }
 }

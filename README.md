@@ -82,12 +82,14 @@ Run these from the Command Palette (`Cmd/Ctrl+Shift+P`):
 | Command | What it does |
 |---|---|
 | **ContextCompresso: Point GitHub Copilot at Proxy** | Sets `github.copilot.advanced.debug.overrideProxyUrl` to the local proxy |
-| **ContextCompresso: Point Claude Code at Proxy** | Sets `ANTHROPIC_BASE_URL` for VS Code's integrated terminal so Claude Code picks it up |
+| **ContextCompresso: Point Claude Code at Proxy** | Sets `claudeCode.environmentVariables` (`ANTHROPIC_BASE_URL`) so the Claude Code VS Code extension routes through the proxy |
 | **ContextCompresso: Show Usage Dashboard** | Opens the dashboard webview |
 | **ContextCompresso: Restart Proxy** | Restarts the bundled proxy process |
 | **ContextCompresso: Open Proxy Logs** | Opens the proxy's log output |
 
-Run the one for whichever tool you use, restart the relevant terminal/window if prompted, and you're done - your API keys and auth headers are forwarded upstream unchanged, so nothing else about how you use the tool changes.
+The extension also prompts you to run one of these automatically the first time the proxy starts, so you shouldn't need to hunt for them in the Command Palette on a fresh install.
+
+Run the one for whichever tool you use and you're done - your API keys and auth headers are forwarded upstream unchanged, so nothing else about how you use the tool changes. Takes effect on the next request; no VS Code restart needed. If you run the Claude Code **CLI** outside VS Code (not the VS Code extension), that setting doesn't reach it - export `ANTHROPIC_BASE_URL` in your shell instead (the command offers to copy this for you).
 
 ---
 

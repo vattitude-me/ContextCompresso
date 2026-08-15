@@ -59,7 +59,34 @@ export function activate(context: vscode.ExtensionContext): void {
 
     const config = vscode.workspace.getConfiguration('contextcompresso');
     if (config.get<boolean>('autoStart', true)) {
-        void proxyManager.start();
+        void proxyManager.start().then(() => promptForClientSetup(context, proxyManager));
+    }
+}
+
+/**
+ * Installing the extension only starts the local proxy - nothing routes traffic to it until
+ * the user runs one of the "Point X at Proxy" commands. That requirement is easy to miss since
+ * it lives in the Command Palette, so prompt for it once, right after the first successful
+ * start, instead of assuming it'll be discovered.
+ */
+async function promptForClientSetup(context: vscode.ExtensionContext, proxyManager: ProxyManager): Promise<void> {
+    const alreadyPrompted = context.globalState.get<boolean>('contextcompresso.didPromptClientSetup', false);
+    if (alreadyPrompted || !proxyManager.getStatus().running) {
+        return;
+    }
+    await context.globalState.update('contextcompresso.didPromptClientSetup', true);
+
+    const choice = await vscode.window.showInformationMessage(
+        'ContextCompresso is running, but nothing is routed through it yet. Point a client at the proxy to start compressing requests.',
+        'Point Claude Code at Proxy',
+        'Point GitHub Copilot at Proxy',
+        'Not now'
+    );
+    const baseUrl = proxyManager.getBaseUrl();
+    if (choice === 'Point Claude Code at Proxy' && baseUrl) {
+        await configureClaudeCode(baseUrl);
+    } else if (choice === 'Point GitHub Copilot at Proxy' && baseUrl) {
+        await configureCopilot(baseUrl);
     }
 }
 
