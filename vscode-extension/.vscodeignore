@@ -4,4 +4,4 @@ src/**
 tsconfig.json
 build.sh
 **/*.map
-node_modules/@types/**
+node_modules/**

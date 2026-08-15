@@ -4,6 +4,10 @@
   "description": "Local token-usage dashboard and compression proxy for Copilot and Claude Code",
   "version": "0.1.0",
   "publisher": "contextcompresso",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/vattitude-me/ContextCompresso.git"
+  },
   "engines": {
     "vscode": "^1.85.0"
   },
