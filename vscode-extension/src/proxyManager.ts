@@ -24,6 +24,11 @@ export class ProxyManager implements vscode.Disposable {
     private process: cp.ChildProcess | null = null;
     private resolvedPort: number | null = null;
     private lastError: string | null = null;
+    // True when this window is using a proxy owned (spawned) by another window rather than
+    // by `process` here. Adopted mode never kills the shared proxy on stop/dispose, and has
+    // no 'exit' event to rely on, so a poller fills that gap — see adoptedHealthPoll.
+    private adopted = false;
+    private adoptedHealthPollHandle: ReturnType<typeof setInterval> | null = null;
     private readonly outputChannel: vscode.OutputChannel;
     private readonly onStatusChangeEmitter = new vscode.EventEmitter<ProxyStatus>();
     readonly onStatusChange = this.onStatusChangeEmitter.event;
@@ -36,13 +41,14 @@ export class ProxyManager implements vscode.Disposable {
     }
 
     /**
-     * running is derived from `process`; resolvedPort is cleared in the same places
-     * `process` is cleared (stop, the 'exit'/'error' handlers) so the two can never drift —
-     * getBaseUrl() can't hand out a port for a process that's no longer running.
+     * running is true if we own a live child process OR we've adopted a healthy proxy owned
+     * by another window. resolvedPort is cleared in every place ownership ends (stop, the
+     * 'exit'/'error' handlers, adoption loss) so the two can never drift — getBaseUrl() can't
+     * hand out a port for a proxy that's no longer there.
      */
     getStatus(): ProxyStatus {
         return {
-            running: this.process !== null && !this.process.killed,
+            running: (this.process !== null && !this.process.killed) || this.adopted,
             port: this.resolvedPort,
             pid: this.process?.pid ?? null,
             lastError: this.lastError
@@ -62,12 +68,14 @@ export class ProxyManager implements vscode.Disposable {
     }
 
     private async startInternal(): Promise<void> {
-        if (this.process && !this.process.killed) {
+        if ((this.process && !this.process.killed) || this.adopted) {
             return;
         }
         this.lastError = null;
 
-        await this.reapStaleProcess();
+        if (await this.tryAdoptExisting()) {
+            return;
+        }
 
         const config = vscode.workspace.getConfiguration('contextcompresso');
         const jarPath = this.resolveJarPath(config.get<string>('jarPath', ''));
@@ -112,7 +120,7 @@ export class ProxyManager implements vscode.Disposable {
             `--contextcompresso.ccr.db-path=${path.join(dataDir, 'ccr.db')}`
         ], { stdio: ['ignore', 'pipe', 'pipe'] });
 
-        this.writePidFile(this.process.pid);
+        this.writePidFile(this.process.pid, port);
 
         this.process.stdout?.on('data', (chunk) => this.outputChannel.append(chunk.toString()));
         this.process.stderr?.on('data', (chunk) => {
@@ -153,16 +161,27 @@ export class ProxyManager implements vscode.Disposable {
         return healthy;
     }
 
+    /**
+     * Detaches this window from the proxy. If we own the process, stop it; if we merely
+     * adopted one owned by another window, just let go — the proxy keeps serving that window.
+     */
     async stop(): Promise<void> {
         return this.enqueue(() => this.stopInternal());
     }
 
+    /**
+     * Restart is an explicit, deliberate action, so unlike stop() it always tears down
+     * whatever proxy is actually on the port — including one owned by another window — and
+     * spawns a fresh instance owned by this window. Other windows will re-adopt the new
+     * instance the next time their health poll or activation runs.
+     */
     async restart(): Promise<void> {
         return this.enqueue(async () => {
             await this.stopInternal();
             const config = vscode.workspace.getConfiguration('contextcompresso');
             const preferredPort = config.get<number>('port', 8137);
             await this.killWhateverIsOnPort(preferredPort);
+            this.clearPidFile();
             await this.startInternal();
         });
     }
@@ -179,6 +198,15 @@ export class ProxyManager implements vscode.Disposable {
     }
 
     private async stopInternal(): Promise<void> {
+        this.stopAdoptedHealthPoll();
+        if (this.adopted) {
+            // Not ours to kill — just stop tracking it. The pidfile stays intact for whoever
+            // (this window on a future start, or another window) still owns it.
+            this.adopted = false;
+            this.resolvedPort = null;
+            this.emitStatus();
+            return;
+        }
         if (this.process && !this.process.killed) {
             this.process.kill();
         }
@@ -189,8 +217,11 @@ export class ProxyManager implements vscode.Disposable {
     }
 
     dispose(): void {
-        this.process?.kill();
-        this.clearPidFile();
+        this.stopAdoptedHealthPoll();
+        if (!this.adopted) {
+            this.process?.kill();
+            this.clearPidFile();
+        }
         this.outputChannel.dispose();
     }
 
@@ -244,15 +275,15 @@ export class ProxyManager implements vscode.Disposable {
         return path.join(this.context.globalStorageUri.fsPath, 'proxy.pid');
     }
 
-    private writePidFile(pid: number | undefined): void {
+    private writePidFile(pid: number | undefined, port: number): void {
         if (pid === undefined) {
             return;
         }
         try {
             fs.mkdirSync(this.context.globalStorageUri.fsPath, { recursive: true });
-            fs.writeFileSync(this.pidFilePath(), String(pid), 'utf8');
+            fs.writeFileSync(this.pidFilePath(), `${pid}:${port}`, 'utf8');
         } catch {
-            // best-effort — losing the pid file just means we can't reap a stale process later
+            // best-effort — losing the pid file just means other windows can't adopt or reap it later
         }
     }
 
@@ -265,41 +296,103 @@ export class ProxyManager implements vscode.Disposable {
     }
 
     /**
-     * If a previous window's proxy never shut down cleanly (crash, force-quit, kill -9 on
-     * VS Code), its PID survives in globalStorage from that session. Killing it here — before
-     * spawning a new instance — closes the leak instead of leaving an orphaned JVM to squat on
-     * the port and relying on the ephemeral-port retry to paper over it.
+     * All windows share one proxy: the first window to start spawns it, later windows adopt
+     * it instead of racing a spawn of their own. The pidfile (shared via globalStorage) is the
+     * handoff point — but a PID found there isn't proof of ownership by itself; it could be a
+     * live proxy another window is actively using, or a leftover from a previous session that
+     * never shut down cleanly (crash, force-quit, kill -9 on VS Code). Only a health check on
+     * the recorded port can tell those apart, so: healthy → adopt, don't touch it; alive but
+     * unresponsive → genuinely stale, kill and fall through to spawning our own.
      */
-    private async reapStaleProcess(): Promise<void> {
-        let pidText: string;
+    private async tryAdoptExisting(): Promise<boolean> {
+        let recorded: { pid: number; port: number } | null;
         try {
-            pidText = fs.readFileSync(this.pidFilePath(), 'utf8').trim();
+            recorded = this.parsePidFile(fs.readFileSync(this.pidFilePath(), 'utf8'));
         } catch {
-            return;
+            return false;
         }
-        const pid = parseInt(pidText, 10);
-        if (!Number.isInteger(pid) || pid <= 0) {
+        if (!recorded) {
             this.clearPidFile();
-            return;
+            return false;
         }
+        const { pid, port } = recorded;
         try {
             process.kill(pid, 0); // signal 0: test existence without killing
         } catch {
             this.clearPidFile(); // no such process — stale file from a clean-ish exit
-            return;
+            return false;
         }
         if (!this.looksLikeOurJar(pid)) {
             // pid was recycled by an unrelated process since our process died — don't touch it
             this.clearPidFile();
-            return;
+            return false;
         }
-        this.outputChannel.appendLine(`[info] killing stale proxy process from a previous session (pid ${pid})`);
+        if (await this.checkHealth(port, 1500)) {
+            this.outputChannel.appendLine(`[info] adopting existing proxy owned by another window (pid ${pid}, port ${port})`);
+            this.resolvedPort = port;
+            this.adopted = true;
+            this.startAdoptedHealthPoll();
+            this.emitStatus();
+            return true;
+        }
+        this.outputChannel.appendLine(`[info] killing stale/unresponsive proxy process from a previous session (pid ${pid})`);
         try {
             process.kill(pid, 'SIGTERM');
         } catch {
             // process disappeared between the existence check and now — fine
         }
         this.clearPidFile();
+        return false;
+    }
+
+    /**
+     * We don't own a child handle for an adopted proxy, so there's no 'exit' event to tell us
+     * when the owning window closes it — poll health instead and drop adoption the moment it
+     * stops responding, so this window's status bar doesn't keep claiming a dead proxy is up.
+     */
+    private startAdoptedHealthPoll(): void {
+        this.stopAdoptedHealthPoll();
+        this.adoptedHealthPollHandle = setInterval(async () => {
+            if (!this.adopted || this.resolvedPort === null) {
+                return;
+            }
+            const healthy = await this.checkHealth(this.resolvedPort, 1500);
+            if (!healthy) {
+                this.outputChannel.appendLine('[info] adopted proxy is no longer reachable');
+                this.adopted = false;
+                this.resolvedPort = null;
+                this.stopAdoptedHealthPoll();
+                this.emitStatus();
+            }
+        }, 5000);
+    }
+
+    private stopAdoptedHealthPoll(): void {
+        if (this.adoptedHealthPollHandle) {
+            clearInterval(this.adoptedHealthPollHandle);
+            this.adoptedHealthPollHandle = null;
+        }
+    }
+
+    private checkHealth(port: number, timeoutMs: number): Promise<boolean> {
+        return new Promise((resolve) => {
+            const req = http.get(`http://localhost:${port}/actuator/health`, { timeout: timeoutMs }, (res) => {
+                res.resume();
+                resolve(res.statusCode === 200);
+            });
+            req.on('error', () => resolve(false));
+            req.on('timeout', () => { req.destroy(); resolve(false); });
+        });
+    }
+
+    private parsePidFile(text: string): { pid: number; port: number } | null {
+        const [pidText, portText] = text.trim().split(':');
+        const pid = parseInt(pidText, 10);
+        const port = parseInt(portText, 10);
+        if (!Number.isInteger(pid) || pid <= 0 || !Number.isInteger(port) || port <= 0) {
+            return null;
+        }
+        return { pid, port };
     }
 
     /**
