@@ -44,15 +44,33 @@ export async function configureCopilot(baseUrl: string): Promise<void> {
  * from `{...process.env}` overlaid with its own `claudeCode.environmentVariables` setting, so
  * that's the one place we can reliably inject ANTHROPIC_BASE_URL for this entrypoint. This
  * takes effect on the next `claude` invocation with no VS Code restart required.
+ *
+ * Written to the workspace (not Global) so pointing Claude Code at this proxy is opt-in per
+ * project — a Global write would silently route every other VS Code window through this
+ * proxy too, so any outage here would take down Claude Code everywhere, not just this repo.
+ * Requires an open workspace folder; without one there's no workspace settings.json to write.
  */
 export async function configureClaudeCode(baseUrl: string): Promise<void> {
+    if (!vscode.workspace.workspaceFolders?.length) {
+        vscode.window.showErrorMessage(
+            'Open a workspace folder first — Claude Code proxy settings are written per-project so other windows are unaffected.'
+        );
+        return;
+    }
+
     const config = vscode.workspace.getConfiguration('claudeCode');
-    const existingVars = config.get<{ name: string; value: string }[]>('environmentVariables', []);
-    const withoutOldBaseUrl = existingVars.filter((v) => v.name !== 'ANTHROPIC_BASE_URL');
+    const inspected = config.inspect<{ name: string; value: string }[]>('environmentVariables');
+    const existingWorkspaceVars = inspected?.workspaceValue ?? [];
+    const withoutOldBaseUrl = existingWorkspaceVars.filter((v) => v.name !== 'ANTHROPIC_BASE_URL');
     await config.update('environmentVariables', [
         ...withoutOldBaseUrl,
         { name: 'ANTHROPIC_BASE_URL', value: baseUrl }
-    ], vscode.ConfigurationTarget.Global);
+    ], vscode.ConfigurationTarget.Workspace);
+
+    if (inspected?.globalValue?.some((v) => v.name === 'ANTHROPIC_BASE_URL')) {
+        const withoutGlobalBaseUrl = inspected.globalValue.filter((v) => v.name !== 'ANTHROPIC_BASE_URL');
+        await config.update('environmentVariables', withoutGlobalBaseUrl, vscode.ConfigurationTarget.Global);
+    }
 
     const choice = await vscode.window.showInformationMessage(
         `Set claudeCode.environmentVariables so Claude Code (VS Code extension) routes through ContextCompresso (${baseUrl}). Takes effect on the next Claude Code request in this window. For the Claude Code CLI run outside VS Code, export ANTHROPIC_BASE_URL=${baseUrl} in your shell instead.`,

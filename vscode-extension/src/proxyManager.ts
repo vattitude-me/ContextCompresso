@@ -27,11 +27,19 @@ export class ProxyManager implements vscode.Disposable {
     private readonly outputChannel: vscode.OutputChannel;
     private readonly onStatusChangeEmitter = new vscode.EventEmitter<ProxyStatus>();
     readonly onStatusChange = this.onStatusChangeEmitter.event;
+    // Serializes start()/restart()/stop() so a click while one is still in flight
+    // joins the in-progress operation instead of racing its own kill/spawn against it.
+    private pending: Promise<void> = Promise.resolve();
 
     constructor(private readonly context: vscode.ExtensionContext) {
         this.outputChannel = vscode.window.createOutputChannel('ContextCompresso');
     }
 
+    /**
+     * running is derived from `process`; resolvedPort is cleared in the same places
+     * `process` is cleared (stop, the 'exit'/'error' handlers) so the two can never drift —
+     * getBaseUrl() can't hand out a port for a process that's no longer running.
+     */
     getStatus(): ProxyStatus {
         return {
             running: this.process !== null && !this.process.killed,
@@ -50,6 +58,10 @@ export class ProxyManager implements vscode.Disposable {
     }
 
     async start(): Promise<void> {
+        return this.enqueue(() => this.startInternal());
+    }
+
+    private async startInternal(): Promise<void> {
         if (this.process && !this.process.killed) {
             return;
         }
@@ -113,6 +125,7 @@ export class ProxyManager implements vscode.Disposable {
         this.process.on('exit', (code) => {
             this.outputChannel.appendLine(`[info] proxy exited with code ${code}`);
             this.process = null;
+            this.resolvedPort = null;
             this.clearPidFile();
             if (!portBindFailed) {
                 this.emitStatus();
@@ -122,6 +135,7 @@ export class ProxyManager implements vscode.Disposable {
             this.lastError = `Failed to launch proxy: ${err.message}`;
             this.outputChannel.appendLine(`[error] ${this.lastError}`);
             this.process = null;
+            this.resolvedPort = null;
             this.clearPidFile();
             this.emitStatus();
         });
@@ -140,20 +154,38 @@ export class ProxyManager implements vscode.Disposable {
     }
 
     async stop(): Promise<void> {
+        return this.enqueue(() => this.stopInternal());
+    }
+
+    async restart(): Promise<void> {
+        return this.enqueue(async () => {
+            await this.stopInternal();
+            const config = vscode.workspace.getConfiguration('contextcompresso');
+            const preferredPort = config.get<number>('port', 8137);
+            await this.killWhateverIsOnPort(preferredPort);
+            await this.startInternal();
+        });
+    }
+
+    /**
+     * Runs `op` after any previously-queued start/stop/restart has settled, so overlapping
+     * calls (e.g. double-clicking "Restart Proxy") join a single queue instead of racing
+     * kill/spawn against each other. A failed op doesn't poison the queue for the next one.
+     */
+    private enqueue(op: () => Promise<void>): Promise<void> {
+        const next = this.pending.catch(() => undefined).then(op);
+        this.pending = next.catch(() => undefined);
+        return next;
+    }
+
+    private async stopInternal(): Promise<void> {
         if (this.process && !this.process.killed) {
             this.process.kill();
         }
         this.process = null;
+        this.resolvedPort = null;
         this.clearPidFile();
         this.emitStatus();
-    }
-
-    async restart(): Promise<void> {
-        await this.stop();
-        const config = vscode.workspace.getConfiguration('contextcompresso');
-        const preferredPort = config.get<number>('port', 8137);
-        await this.killWhateverIsOnPort(preferredPort);
-        await this.start();
     }
 
     dispose(): void {
