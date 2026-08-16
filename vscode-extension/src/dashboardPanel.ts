@@ -46,12 +46,20 @@ export class DashboardPanel {
             } else if (message?.type === 'configureClaudeCode') {
                 const baseUrl = this.proxyManager.getBaseUrl();
                 if (baseUrl) {
-                    void configureClaudeCode(baseUrl).then(() => this.refresh());
+                    void configureClaudeCode(baseUrl)
+                        .then(() => this.notify('Claude Code is now routed through ContextCompresso.'))
+                        .then(() => this.refresh());
+                } else {
+                    this.notify('Proxy is still starting up — try again in a moment.', true);
                 }
             } else if (message?.type === 'configureCopilot') {
                 const baseUrl = this.proxyManager.getBaseUrl();
                 if (baseUrl) {
-                    void configureCopilot(baseUrl).then(() => this.refresh());
+                    void configureCopilot(baseUrl)
+                        .then(() => this.notify('Copilot is now routed through ContextCompresso.'))
+                        .then(() => this.refresh());
+                } else {
+                    this.notify('Proxy is still starting up — try again in a moment.', true);
                 }
             } else if (message?.type === 'openLogs') {
                 this.proxyManager.showLogs();
@@ -81,6 +89,11 @@ export class DashboardPanel {
             proxyBuild: proxyVersion?.buildNumber ?? null
         };
         this.panel.webview.postMessage({ type: 'update', live, today, topCosts, proxyStatus, versions, clients });
+    }
+
+    /** Surfaces action feedback inside the panel itself — a corner toast is too easy to miss. */
+    private notify(text: string, isError = false): void {
+        this.panel.webview.postMessage({ type: 'notice', text, isError });
     }
 
     private dispose(): void {
@@ -151,9 +164,20 @@ export class DashboardPanel {
   .empty-state .title { font-size: 14px; font-weight: 600; margin-bottom: 6px; }
   .empty-state .hint { color: var(--vscode-descriptionForeground); font-size: 12px; margin-bottom: 16px; }
   .empty-state .actions { display: flex; gap: 8px; justify-content: center; flex-wrap: wrap; }
+  .notice {
+    position: sticky; top: 0; z-index: 10;
+    background: var(--vscode-inputValidation-infoBackground, var(--vscode-editorWidget-background));
+    border: 1px solid var(--vscode-inputValidation-infoBorder, var(--vscode-widget-border));
+    border-radius: 6px; padding: 8px 12px; margin-bottom: 12px; font-size: 12px;
+  }
+  .notice.error {
+    background: var(--vscode-inputValidation-errorBackground, var(--vscode-editorWidget-background));
+    border-color: var(--vscode-inputValidation-errorBorder, var(--vscode-errorForeground));
+  }
 </style>
 </head>
 <body>
+  <div id="notice-container"></div>
   <div id="root">
     <div class="empty-state">
       <div class="icon">⏳</div>
@@ -314,9 +338,19 @@ export class DashboardPanel {
       document.getElementById('wire-copilot-btn')?.addEventListener('click', () => vscode.postMessage({ type: 'configureCopilot' }));
     }
 
+    let noticeTimer = null;
+    function showNotice(text, isError) {
+      const container = document.getElementById('notice-container');
+      if (noticeTimer) clearTimeout(noticeTimer);
+      container.innerHTML = '<div class="notice' + (isError ? ' error' : '') + '">' + text + '</div>';
+      noticeTimer = setTimeout(() => { container.innerHTML = ''; }, 5000);
+    }
+
     window.addEventListener('message', (event) => {
       if (event.data?.type === 'update') {
         render(event.data);
+      } else if (event.data?.type === 'notice') {
+        showNotice(event.data.text, event.data.isError);
       }
     });
   </script>
