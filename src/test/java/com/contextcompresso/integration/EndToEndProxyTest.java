@@ -128,4 +128,28 @@ class EndToEndProxyTest {
         RecordedRequest recorded = defaultUpstream.takeRequest();
         assertThat(recorded).isNotNull();
     }
+
+    @Test
+    void acceptsLargeRequestBodiesAboveDefaultWebFluxCodecLimit() throws InterruptedException {
+        StringBuilder bigBody = new StringBuilder();
+        for (int i = 0; i < 15000; i++) {
+            bigBody.append("This is a repeated chunk of content used to exceed the default 256KB in-memory limit for WebFlux request buffering. ");
+        }
+        String requestBody = "{\"model\":\"gpt-4\",\"messages\":[{\"role\":\"user\",\"content\":\"" + bigBody + "\"}]}";
+
+        defaultUpstream.enqueue(new MockResponse().setResponseCode(200).setBody("{\"id\":\"resp-large\",\"choices\":[]}").addHeader("Content-Type", "application/json"));
+
+        assertThat(requestBody.length()).isGreaterThan(262_144);
+
+        webTestClient.post().uri("/v1/chat/completions")
+                .header("Content-Type", "application/json")
+                .bodyValue(requestBody)
+                .exchange()
+                .expectStatus().isOk()
+                .expectHeader().value("X-CC-Original-Chars",
+                        chars -> assertThat(Long.parseLong(chars)).isGreaterThan(262_144));
+
+        RecordedRequest recorded = defaultUpstream.takeRequest();
+        assertThat(recorded).isNotNull();
+    }
 }

@@ -6,6 +6,8 @@ spring:
     name: contextcompresso
   main:
     web-application-type: reactive
+  codec:
+    max-in-memory-size: 10MB
   datasource:
     url: jdbc:sqlite:${contextcompresso.ccr.db-path}
     driver-class-name: org.sqlite.JDBC
