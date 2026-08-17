@@ -136,7 +136,7 @@ public class CompressionPipeline {
         JsonNode messages = result.get("messages");
         if (messages != null && messages.isArray()) {
             JsonNode aligned = cacheAligner.align(messages, config.name());
-            JsonNode crushed = smartCrusher.crush(aligned);
+            JsonNode crushed = smartCrusher.crushMessagesArray((ArrayNode) aligned);
 
             ArrayNode processedMessages = (ArrayNode) crushed;
             for (int i = 0; i < processedMessages.size(); i++) {

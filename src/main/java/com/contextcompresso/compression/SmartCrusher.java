@@ -44,17 +44,43 @@ public class SmartCrusher {
         return node;
     }
 
+    /**
+     * Crushes each element of the top-level messages array without ever truncating the array
+     * itself. Anthropic (and OpenAI-compatible providers) validate message count, role
+     * alternation, and tool_use/tool_result pairing on this array directly — splicing in a
+     * "[...truncated...]" sentinel or dropping messages here produces a structurally invalid
+     * request (e.g. a dangling tool_use with no matching tool_result), not a smaller valid one.
+     * Element-count limits are only safe to apply to arrays *nested inside* a message's content.
+     */
+    public JsonNode crushMessagesArray(ArrayNode messages) {
+        ArrayNode rebuilt = messages.arrayNode();
+        for (JsonNode element : messages) {
+            rebuilt.add(crush(element));
+        }
+        return rebuilt;
+    }
+
     private JsonNode crushObject(ObjectNode object) {
         ObjectNode rebuilt = object.objectNode();
+        boolean isContentBlock = object.has("type");
         Iterator<Map.Entry<String, JsonNode>> fields = object.fields();
         while (fields.hasNext()) {
             Map.Entry<String, JsonNode> entry = fields.next();
+            String key = entry.getKey();
             JsonNode value = entry.getValue();
+            // Anthropic content blocks (tool_use, tool_result, ...) require certain fields to be
+            // present even when empty - e.g. a no-arg tool_use's "input" is legitimately {}, and
+            // dropping it produces a block missing a required field. Only prune loose/empty
+            // metadata, never a field that belongs to a typed content block's schema.
+            if (isContentBlock && !"type".equals(key)) {
+                rebuilt.set(key, crush(value));
+                continue;
+            }
             if (isNullOrEmpty(value)) {
                 continue;
             }
             // re-insertion on a rebuilt map naturally applies last-wins semantics
-            rebuilt.set(entry.getKey(), crush(value));
+            rebuilt.set(key, crush(value));
         }
         return rebuilt;
     }

@@ -67,4 +67,75 @@ class SmartCrusherTest {
         JsonNode result = crusher.crush(node);
         assertThat(result.get("text").asText()).isEqualTo("hello world");
     }
+
+    // Regression: crushMessagesArray must never apply the array-truncation-with-sentinel
+    // behavior to the messages array itself. Anthropic validates message count and
+    // tool_use/tool_result pairing on this array directly, so splicing a sentinel string in
+    // (as crush()/crushArray does for any oversized array) produces an invalid request.
+    @Test
+    void crushMessagesArrayNeverTruncatesEvenWhenOverLimit() {
+        ArrayNode messages = mapper.createArrayNode();
+        for (int i = 0; i < 50; i++) {
+            ObjectNode message = mapper.createObjectNode();
+            message.put("role", i % 2 == 0 ? "user" : "assistant");
+            message.put("content", "message " + i);
+            messages.add(message);
+        }
+
+        JsonNode result = crusher.crushMessagesArray(messages);
+        ArrayNode resultArray = (ArrayNode) result;
+
+        assertThat(resultArray.size()).isEqualTo(50);
+        for (JsonNode n : resultArray) {
+            assertThat(n.isObject()).isTrue();
+        }
+    }
+
+    // Regression: a no-arg tool_use's "input": {} is a required field on the content block
+    // and must survive crush() even though {} would normally be pruned as empty.
+    @Test
+    void preservesEmptyInputOnToolUseBlock() {
+        ObjectNode toolUse = mapper.createObjectNode();
+        toolUse.put("type", "tool_use");
+        toolUse.put("id", "toolu_01X");
+        toolUse.put("name", "Bash");
+        toolUse.putObject("input");
+
+        JsonNode result = crusher.crush(toolUse);
+
+        assertThat(result.has("input")).isTrue();
+        assertThat(result.get("input").isObject()).isTrue();
+        assertThat(result.get("input").isEmpty()).isTrue();
+    }
+
+    // Regression: a tool_result's content array can legitimately be empty; it must not be
+    // dropped from the block since Anthropic's schema requires the field to be present.
+    @Test
+    void preservesEmptyContentArrayOnToolResultBlock() {
+        ObjectNode toolResult = mapper.createObjectNode();
+        toolResult.put("type", "tool_result");
+        toolResult.put("tool_use_id", "toolu_01X");
+        toolResult.putArray("content");
+
+        JsonNode result = crusher.crush(toolResult);
+
+        assertThat(result.has("content")).isTrue();
+        assertThat(result.get("content").isArray()).isTrue();
+    }
+
+    // Non-content-block objects (no "type" field) should still prune empty/null fields as
+    // before — the exception is scoped to typed content blocks, not applied globally.
+    @Test
+    void stillPrunesEmptyFieldsOnNonContentBlockObjects() {
+        ObjectNode node = mapper.createObjectNode();
+        node.put("keep", "value");
+        node.putObject("emptyObject");
+        node.putArray("emptyArray");
+
+        JsonNode result = crusher.crush(node);
+
+        assertThat(result.has("emptyObject")).isFalse();
+        assertThat(result.has("emptyArray")).isFalse();
+        assertThat(result.get("keep").asText()).isEqualTo("value");
+    }
 }
