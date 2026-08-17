@@ -21,6 +21,14 @@
         "title": "ContextCompresso: Show Usage Dashboard"
       },
       {
+        "command": "contextcompresso.start",
+        "title": "ContextCompresso: Start Proxy"
+      },
+      {
+        "command": "contextcompresso.stop",
+        "title": "ContextCompresso: Stop Proxy"
+      },
+      {
         "command": "contextcompresso.restart",
         "title": "ContextCompresso: Restart Proxy"
       },

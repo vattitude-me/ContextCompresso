@@ -5,11 +5,30 @@ import * as net from 'net';
 import * as path from 'path';
 import * as http from 'http';
 
+/**
+ * A single `running: boolean` collapsed four very different situations — booting, healthy,
+ * deliberately stopped, and crashed — into one "not running" screen, which read as a failure
+ * even during a normal 10s JVM startup. The UI needs to tell them apart to say something
+ * accurate, so lifecycle state is explicit.
+ *
+ * - `starting`  spawn issued, waiting on /actuator/health
+ * - `running`   healthy and owned by this window
+ * - `adopted`   healthy, owned by another VS Code window (we're a guest — see tryAdoptExisting)
+ * - `stopping`  teardown issued
+ * - `stopped`   deliberately stopped by the user; nothing is wrong
+ * - `error`     start failed or the process died unexpectedly; lastError explains why
+ */
+export type ProxyState = 'starting' | 'running' | 'adopted' | 'stopping' | 'stopped' | 'error';
+
 export interface ProxyStatus {
+    /** Convenience for callers that only care about reachability: true for running/adopted. */
     running: boolean;
+    state: ProxyState;
     port: number | null;
     pid: number | null;
     lastError: string | null;
+    /** True while a start/stop/restart is in flight, so the UI can disable its buttons. */
+    busy: boolean;
 }
 
 /**
@@ -24,6 +43,7 @@ export class ProxyManager implements vscode.Disposable {
     private process: cp.ChildProcess | null = null;
     private resolvedPort: number | null = null;
     private lastError: string | null = null;
+    private state: ProxyState = 'stopped';
     // True when this window is using a proxy owned (spawned) by another window rather than
     // by `process` here. Adopted mode never kills the shared proxy on stop/dispose, and has
     // no 'exit' event to rely on, so a poller fills that gap — see adoptedHealthPoll.
@@ -35,24 +55,33 @@ export class ProxyManager implements vscode.Disposable {
     // Serializes start()/restart()/stop() so a click while one is still in flight
     // joins the in-progress operation instead of racing its own kill/spawn against it.
     private pending: Promise<void> = Promise.resolve();
+    private inFlight = 0;
 
     constructor(private readonly context: vscode.ExtensionContext) {
         this.outputChannel = vscode.window.createOutputChannel('ContextCompresso');
     }
 
     /**
-     * running is true if we own a live child process OR we've adopted a healthy proxy owned
-     * by another window. resolvedPort is cleared in every place ownership ends (stop, the
+     * running is true only for states where the proxy is actually reachable, so callers that
+     * gate network calls on it (StatsClient, the client-config commands) don't fire at a proxy
+     * that is still booting. resolvedPort is cleared in every place ownership ends (stop, the
      * 'exit'/'error' handlers, adoption loss) so the two can never drift — getBaseUrl() can't
      * hand out a port for a proxy that's no longer there.
      */
     getStatus(): ProxyStatus {
         return {
-            running: (this.process !== null && !this.process.killed) || this.adopted,
+            running: this.state === 'running' || this.state === 'adopted',
+            state: this.state,
             port: this.resolvedPort,
             pid: this.process?.pid ?? null,
-            lastError: this.lastError
+            lastError: this.lastError,
+            busy: this.inFlight > 0
         };
+    }
+
+    private setState(state: ProxyState): void {
+        this.state = state;
+        this.emitStatus();
     }
 
     getBaseUrl(): string | null {
@@ -80,20 +109,17 @@ export class ProxyManager implements vscode.Disposable {
         const config = vscode.workspace.getConfiguration('contextcompresso');
         const jarPath = this.resolveJarPath(config.get<string>('jarPath', ''));
         if (!jarPath || !fs.existsSync(jarPath)) {
-            this.lastError = `contextcompresso.jar not found at ${jarPath}. Set contextcompresso.jarPath in settings.`;
-            this.outputChannel.appendLine(`[error] ${this.lastError}`);
-            this.emitStatus();
+            this.fail(`Bundled proxy not found at ${jarPath}. Set "contextcompresso.jarPath" in settings to point at a contextcompresso.jar.`);
             return;
         }
 
         const javaPath = await this.resolveJavaPath(config.get<string>('javaPath', ''));
         if (!javaPath) {
-            this.lastError = 'No Java 17+ runtime found. Set contextcompresso.javaPath or install a JDK.';
-            this.outputChannel.appendLine(`[error] ${this.lastError}`);
-            this.emitStatus();
+            this.fail('No Java 17 or newer runtime found. Install a JDK 17+, or set "contextcompresso.javaPath" to an existing one.');
             return;
         }
 
+        this.setState('starting');
         const preferredPort = config.get<number>('port', 8137);
         const started = await this.spawnAndWait(javaPath, jarPath, preferredPort);
         if (!started && preferredPort !== 0) {
@@ -101,8 +127,20 @@ export class ProxyManager implements vscode.Disposable {
             // (e.g. a leftover instance from a previous window grabbed it first).
             // Retry once on an OS-assigned ephemeral port rather than surfacing the failure.
             this.outputChannel.appendLine('[info] retrying on an ephemeral port after bind failure');
-            await this.spawnAndWait(javaPath, jarPath, 0);
+            if (await this.spawnAndWait(javaPath, jarPath, 0)) {
+                return;
+            }
         }
+        if (!started && this.state === 'starting') {
+            this.fail(this.lastError ?? 'The proxy failed to start. Open the logs for details.');
+        }
+    }
+
+    /** Records a user-facing failure reason and moves to the error state in one step. */
+    private fail(message: string): void {
+        this.lastError = message;
+        this.outputChannel.appendLine(`[error] ${message}`);
+        this.setState('error');
     }
 
     private async spawnAndWait(javaPath: string, jarPath: string, preferredPort: number): Promise<boolean> {
@@ -114,38 +152,53 @@ export class ProxyManager implements vscode.Disposable {
         fs.mkdirSync(dataDir, { recursive: true });
 
         let portBindFailed = false;
-        this.process = cp.spawn(javaPath, [
+        const child = cp.spawn(javaPath, [
             '-jar', jarPath,
             `--server.port=${port}`,
             `--contextcompresso.ccr.db-path=${path.join(dataDir, 'ccr.db')}`
         ], { stdio: ['ignore', 'pipe', 'pipe'] });
+        this.process = child;
 
-        this.writePidFile(this.process.pid, port);
+        this.writePidFile(child.pid, port);
 
-        this.process.stdout?.on('data', (chunk) => this.outputChannel.append(chunk.toString()));
-        this.process.stderr?.on('data', (chunk) => {
+        // Every handler below is scoped to `child`, not to `this.process`. A restart kills the
+        // old JVM and spawns a new one immediately, but the old process's 'exit' fires later —
+        // unscoped, that late event would null out the *replacement's* port and leave the panel
+        // claiming "Running" with no address to connect a client to.
+        const isCurrent = () => this.process === child;
+
+        child.stdout?.on('data', (chunk) => this.outputChannel.append(chunk.toString()));
+        child.stderr?.on('data', (chunk) => {
             const text = chunk.toString();
             this.outputChannel.append(text);
             if (text.includes('already in use')) {
                 portBindFailed = true;
             }
         });
-        this.process.on('exit', (code) => {
+        child.on('exit', (code) => {
             this.outputChannel.appendLine(`[info] proxy exited with code ${code}`);
-            this.process = null;
-            this.resolvedPort = null;
-            this.clearPidFile();
-            if (!portBindFailed) {
-                this.emitStatus();
+            if (!isCurrent()) {
+                return; // superseded by a newer process — its state is the live one
             }
-        });
-        this.process.on('error', (err) => {
-            this.lastError = `Failed to launch proxy: ${err.message}`;
-            this.outputChannel.appendLine(`[error] ${this.lastError}`);
             this.process = null;
             this.resolvedPort = null;
             this.clearPidFile();
-            this.emitStatus();
+            if (portBindFailed) {
+                return; // the ephemeral-port retry is about to run; don't flash an error state
+            }
+            if (this.state === 'stopping' || this.state === 'stopped') {
+                return; // expected: we asked it to exit
+            }
+            this.fail(`The proxy stopped unexpectedly (exit code ${code}). Open the logs to see why.`);
+        });
+        child.on('error', (err) => {
+            if (!isCurrent()) {
+                return;
+            }
+            this.process = null;
+            this.resolvedPort = null;
+            this.clearPidFile();
+            this.fail(`Could not launch the proxy: ${err.message}`);
         });
 
         this.emitStatus();
@@ -154,11 +207,13 @@ export class ProxyManager implements vscode.Disposable {
             if (portBindFailed) {
                 return false;
             }
-            this.lastError = 'Proxy did not become healthy within 30s. Check ContextCompresso output for details.';
+            this.lastError = `The proxy did not respond on port ${port} within 30 seconds. Open the logs for details.`;
             this.outputChannel.appendLine(`[error] ${this.lastError}`);
+            return false;
         }
-        this.emitStatus();
-        return healthy;
+        this.lastError = null;
+        this.setState('running');
+        return true;
     }
 
     /**
@@ -181,6 +236,9 @@ export class ProxyManager implements vscode.Disposable {
             const config = vscode.workspace.getConfiguration('contextcompresso');
             const preferredPort = config.get<number>('port', 8137);
             await this.killWhateverIsOnPort(preferredPort);
+            // Same unbind delay as stopInternal: without this the fresh instance loses the
+            // race for the configured port and silently comes up somewhere else.
+            await this.waitForPortRelease(preferredPort, 5000);
             this.clearPidFile();
             await this.startInternal();
         });
@@ -192,8 +250,13 @@ export class ProxyManager implements vscode.Disposable {
      * kill/spawn against each other. A failed op doesn't poison the queue for the next one.
      */
     private enqueue(op: () => Promise<void>): Promise<void> {
+        this.inFlight++;
+        this.emitStatus(); // reflect busy immediately so buttons disable on click, not on completion
         const next = this.pending.catch(() => undefined).then(op);
-        this.pending = next.catch(() => undefined);
+        this.pending = next.catch(() => undefined).finally(() => {
+            this.inFlight--;
+            this.emitStatus();
+        });
         return next;
     }
 
@@ -204,16 +267,39 @@ export class ProxyManager implements vscode.Disposable {
             // (this window on a future start, or another window) still owns it.
             this.adopted = false;
             this.resolvedPort = null;
-            this.emitStatus();
+            this.setState('stopped');
             return;
         }
         if (this.process && !this.process.killed) {
+            const port = this.resolvedPort;
+            this.setState('stopping');
+            // Keep this.process set across the kill so the child's own 'exit' handler still
+            // recognises itself as current and performs its cleanup.
             this.process.kill();
+            // The JVM takes a beat to unbind after SIGTERM. Returning before then makes an
+            // immediate Start land on the ephemeral-port fallback (because the old process
+            // still holds the configured port), so the proxy silently moves and every client
+            // pointed at the old address breaks. Wait for the port to actually come free.
+            if (port !== null) {
+                await this.waitForPortRelease(port, 5000);
+            }
         }
         this.process = null;
         this.resolvedPort = null;
         this.clearPidFile();
-        this.emitStatus();
+        this.lastError = null;
+        this.setState('stopped');
+    }
+
+    /** Resolves once nothing answers on `port`, or the timeout expires (best-effort). */
+    private async waitForPortRelease(port: number, timeoutMs: number): Promise<void> {
+        const deadline = Date.now() + timeoutMs;
+        while (Date.now() < deadline) {
+            if (!(await this.checkHealth(port, 500))) {
+                return;
+            }
+            await new Promise((resolve) => setTimeout(resolve, 200));
+        }
     }
 
     dispose(): void {
@@ -331,8 +417,9 @@ export class ProxyManager implements vscode.Disposable {
             this.outputChannel.appendLine(`[info] adopting existing proxy owned by another window (pid ${pid}, port ${port})`);
             this.resolvedPort = port;
             this.adopted = true;
+            this.lastError = null;
             this.startAdoptedHealthPoll();
-            this.emitStatus();
+            this.setState('adopted');
             return true;
         }
         this.outputChannel.appendLine(`[info] killing stale/unresponsive proxy process from a previous session (pid ${pid})`);
@@ -362,7 +449,7 @@ export class ProxyManager implements vscode.Disposable {
                 this.adopted = false;
                 this.resolvedPort = null;
                 this.stopAdoptedHealthPoll();
-                this.emitStatus();
+                this.fail('The shared proxy (started by another VS Code window) is no longer reachable. Start one here to continue.');
             }
         }, 5000);
     }

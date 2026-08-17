@@ -3,7 +3,7 @@ import { ProxyManager } from './proxyManager';
 import { StatsClient } from './statsClient';
 import { StatusBarController } from './statusBar';
 import { DashboardPanel } from './dashboardPanel';
-import { configureCopilot, configureClaudeCode } from './clientConfig';
+import { configureCopilot, configureClaudeCode, ConfigureResult } from './clientConfig';
 
 const STATUS_BAR_POLL_MS = 5000;
 
@@ -16,10 +16,10 @@ export function activate(context: vscode.ExtensionContext): void {
 
     proxyManager.onStatusChange((status) => statusBar.updateProxyStatus(status), null, context.subscriptions);
 
+    // Lifecycle transitions arrive via onStatusChange; this poll exists only to refresh the
+    // live numbers on an already-running proxy.
     const pollHandle = setInterval(async () => {
-        const status = proxyManager.getStatus();
-        if (!status.running) {
-            statusBar.updateProxyStatus(status);
+        if (!proxyManager.getStatus().running) {
             return;
         }
         const live = await statsClient.fetchLive();
@@ -32,9 +32,27 @@ export function activate(context: vscode.ExtensionContext): void {
             const extensionVersion = context.extension.packageJSON.version as string;
             DashboardPanel.show(context, statsClient, proxyManager, extensionVersion);
         }),
+        vscode.commands.registerCommand('contextcompresso.start', async () => {
+            await proxyManager.start();
+            const status = proxyManager.getStatus();
+            if (status.running) {
+                vscode.window.showInformationMessage(`ContextCompresso proxy running on ${proxyManager.getBaseUrl()}.`);
+            } else {
+                void showFailure(proxyManager, status.lastError ?? 'The proxy did not start.');
+            }
+        }),
+        vscode.commands.registerCommand('contextcompresso.stop', async () => {
+            await proxyManager.stop();
+            vscode.window.showInformationMessage('ContextCompresso proxy stopped.');
+        }),
         vscode.commands.registerCommand('contextcompresso.restart', async () => {
             await proxyManager.restart();
-            vscode.window.showInformationMessage('ContextCompresso proxy restarted.');
+            const status = proxyManager.getStatus();
+            if (status.running) {
+                vscode.window.showInformationMessage(`ContextCompresso proxy restarted on ${proxyManager.getBaseUrl()}.`);
+            } else {
+                void showFailure(proxyManager, status.lastError ?? 'The proxy did not come back up.');
+            }
         }),
         vscode.commands.registerCommand('contextcompresso.openLogs', () => {
             proxyManager.showLogs();
@@ -42,24 +60,63 @@ export function activate(context: vscode.ExtensionContext): void {
         vscode.commands.registerCommand('contextcompresso.configureCopilot', async () => {
             const baseUrl = proxyManager.getBaseUrl();
             if (!baseUrl) {
-                vscode.window.showErrorMessage('ContextCompresso proxy is not running yet.');
+                vscode.window.showErrorMessage('Start the ContextCompresso proxy first — there is no address to point Copilot at yet.');
                 return;
             }
-            await configureCopilot(baseUrl);
+            await reportConfigure(await configureCopilot(baseUrl));
         }),
         vscode.commands.registerCommand('contextcompresso.configureClaudeCode', async () => {
             const baseUrl = proxyManager.getBaseUrl();
             if (!baseUrl) {
-                vscode.window.showErrorMessage('ContextCompresso proxy is not running yet.');
+                vscode.window.showErrorMessage('Start the ContextCompresso proxy first — there is no address to point Claude Code at yet.');
                 return;
             }
-            await configureClaudeCode(baseUrl);
+            await reportConfigure(await configureClaudeCode(baseUrl));
         })
     );
 
     const config = vscode.workspace.getConfiguration('contextcompresso');
     if (config.get<boolean>('autoStart', true)) {
-        void proxyManager.start().then(() => promptForClientSetup(context, proxyManager));
+        void proxyManager.start().then(async () => {
+            const status = proxyManager.getStatus();
+            if (status.running) {
+                await promptForClientSetup(context, proxyManager);
+                return;
+            }
+            // Silent failure on activation is the worst version of this: the status bar shows
+            // an error the user never opted into and has no path out of.
+            await showFailure(proxyManager, `ContextCompresso could not start: ${status.lastError ?? 'unknown error.'}`);
+        });
+    }
+}
+
+/** Surfaces a configure result from the Command Palette, offering the reload when one is needed. */
+async function reportConfigure(result: ConfigureResult): Promise<void> {
+    if (!result.ok) {
+        vscode.window.showErrorMessage(result.message);
+        return;
+    }
+    if (!result.needsReload) {
+        vscode.window.showInformationMessage(result.message);
+        return;
+    }
+    const choice = await vscode.window.showInformationMessage(result.message, 'Reload Window');
+    if (choice === 'Reload Window') {
+        await vscode.commands.executeCommand('workbench.action.reloadWindow');
+    }
+}
+
+/**
+ * A bare error toast leaves the user with nothing to do about it. Every failure here is
+ * recoverable through either the logs or a setting (missing Java, wrong jar path), so offer
+ * both routes rather than just stating the problem.
+ */
+async function showFailure(proxyManager: ProxyManager, message: string): Promise<void> {
+    const choice = await vscode.window.showErrorMessage(message, 'Open Logs', 'Open Settings');
+    if (choice === 'Open Logs') {
+        proxyManager.showLogs();
+    } else if (choice === 'Open Settings') {
+        await vscode.commands.executeCommand('workbench.action.openSettings', 'contextcompresso');
     }
 }
 
@@ -84,9 +141,9 @@ async function promptForClientSetup(context: vscode.ExtensionContext, proxyManag
     );
     const baseUrl = proxyManager.getBaseUrl();
     if (choice === 'Point Claude Code at Proxy' && baseUrl) {
-        await configureClaudeCode(baseUrl);
+        await reportConfigure(await configureClaudeCode(baseUrl));
     } else if (choice === 'Point GitHub Copilot at Proxy' && baseUrl) {
-        await configureCopilot(baseUrl);
+        await reportConfigure(await configureCopilot(baseUrl));
     }
 }
 

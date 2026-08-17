@@ -110,6 +110,26 @@ class ClaudeProxyTest {
         assertThat(recorded.getHeaders().get("X-Api-Key")).isEqualTo("sk-ant-test123");
     }
 
+    // Regression: Authorization was absent from the claude forward-headers list, so OAuth
+    // subscription requests (Claude Code signed in without an API key) reached Anthropic with
+    // no credential at all and came back 401 "x-api-key header is required".
+    @Test
+    void oauthAuthorizationHeaderForwarded() throws InterruptedException {
+        String requestBody = "{\"model\":\"claude-3-opus\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}";
+
+        claudeUpstream.enqueue(new MockResponse().setResponseCode(200).setBody("{\"id\":\"resp\"}").addHeader("Content-Type", "application/json"));
+
+        webTestClient.post().uri("/v1/messages")
+                .header("Authorization", "Bearer sk-ant-oat01-test123")
+                .header("Content-Type", "application/json")
+                .bodyValue(requestBody)
+                .exchange()
+                .expectStatus().isOk();
+
+        RecordedRequest recorded = claudeUpstream.takeRequest();
+        assertThat(recorded.getHeaders().get("Authorization")).isEqualTo("Bearer sk-ant-oat01-test123");
+    }
+
     @Test
     void largeToolResultsTruncated() throws InterruptedException {
         StringBuilder largeResult = new StringBuilder();

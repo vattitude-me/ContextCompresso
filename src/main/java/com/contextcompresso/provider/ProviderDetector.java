@@ -29,6 +29,14 @@ public class ProviderDetector {
             return Provider.CLAUDE;
         }
 
+        // Claude Code sends an OAuth bearer token instead of X-Api-Key when the user is signed
+        // in with a Claude subscription. That matched no rule above and only reached CLAUDE via
+        // the path check below — correct for /v1/messages but silently wrong for any other path,
+        // which would route a Claude credential to the OpenAI default upstream.
+        if (auth != null && auth.regionMatches(true, 0, "Bearer sk-ant-", 0, "Bearer sk-ant-".length())) {
+            return Provider.CLAUDE;
+        }
+
         if (request.getPath().toString().contains("/v1/messages")) {
             return Provider.CLAUDE;
         }

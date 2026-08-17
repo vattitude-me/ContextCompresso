@@ -46,7 +46,12 @@ contextcompresso:
       auth-type: api-key
       max-context-tokens: 200000
       token-estimator: anthropic
+      # Authorization carries the OAuth bearer token that Claude Code sends when the user is
+      # signed in with a Claude subscription rather than an API key. Omitting it stripped the
+      # only credential on those requests, so Anthropic answered "x-api-key header is required"
+      # and the client retried in a loop that looked like a hang.
       forward-headers:
+        - Authorization
         - X-Api-Key
         - Anthropic-Version
         - Anthropic-Beta

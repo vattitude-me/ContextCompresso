@@ -34,24 +34,58 @@ function trendArrow(delta: number): string {
  */
 export class StatusBarController implements vscode.Disposable {
     private readonly item: vscode.StatusBarItem;
+    private lastState: ProxyStatus['state'] = 'stopped';
 
     constructor() {
         this.item = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 100);
         this.item.command = 'contextcompresso.showPanel';
         this.item.show();
-        this.renderDisconnected();
+        this.renderLifecycle({ running: false, state: 'stopped', port: null, pid: null, lastError: null, busy: false });
     }
 
     updateProxyStatus(status: ProxyStatus): void {
+        this.lastState = status.state;
         if (!status.running) {
-            this.renderDisconnected(status.lastError);
+            this.renderLifecycle(status);
+        }
+    }
+
+    /**
+     * Non-running states are not interchangeable: "starting" is normal progress and must not
+     * wear the error background that "crashed" does, or every launch looks like a failure.
+     */
+    private renderLifecycle(status: ProxyStatus): void {
+        const errorBg = new vscode.ThemeColor('statusBarItem.warningBackground');
+        switch (status.state) {
+            case 'starting':
+                this.item.text = '$(loading~spin) CC: starting…';
+                this.item.tooltip = 'ContextCompresso proxy is starting up.';
+                this.item.backgroundColor = undefined;
+                return;
+            case 'stopping':
+                this.item.text = '$(loading~spin) CC: stopping…';
+                this.item.tooltip = 'ContextCompresso proxy is shutting down.';
+                this.item.backgroundColor = undefined;
+                return;
+            case 'stopped':
+                this.item.text = '$(debug-start) CC: stopped';
+                this.item.tooltip = 'ContextCompresso proxy is stopped. Click to open the dashboard and start it.';
+                this.item.backgroundColor = undefined;
+                return;
+            default:
+                this.item.text = '$(warning) CC: proxy error';
+                this.item.tooltip = status.lastError ?? 'The ContextCompresso proxy failed. Click to open the dashboard.';
+                this.item.backgroundColor = errorBg;
         }
     }
 
     updateStats(stats: LiveStats | null): void {
+        if (this.lastState !== 'running' && this.lastState !== 'adopted') {
+            return; // a stale stats poll must not overwrite a starting/stopped/error label
+        }
         if (!stats || stats.turns === 0) {
-            this.item.text = '$(circle-outline) CC: idle';
-            this.item.tooltip = 'ContextCompresso: no activity recorded yet this session';
+            this.item.text = '$(check) CC: ready';
+            this.item.tooltip = 'ContextCompresso proxy is running. No requests captured yet — click for the dashboard.';
             this.item.backgroundColor = undefined;
             return;
         }
@@ -83,12 +117,6 @@ export class StatusBarController implements vscode.Disposable {
         md.appendMarkdown(`Compression: ${Math.round(stats.compression.ratio * 100)}% of request chars kept\n\n`);
         md.appendMarkdown(`_Click for the full dashboard._`);
         return md;
-    }
-
-    private renderDisconnected(error?: string | null): void {
-        this.item.text = '$(debug-disconnect) CC: proxy not running';
-        this.item.tooltip = error ?? 'ContextCompresso proxy is not running. Click to open the dashboard.';
-        this.item.backgroundColor = new vscode.ThemeColor('statusBarItem.errorBackground');
     }
 
     dispose(): void {

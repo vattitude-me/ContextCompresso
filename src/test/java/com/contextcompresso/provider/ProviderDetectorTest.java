@@ -34,6 +34,24 @@ class ProviderDetectorTest {
         assertThat(detector.detect(request)).isEqualTo(Provider.CLAUDE);
     }
 
+    // Uses a non-/v1/messages path on purpose: the path fallback would return CLAUDE anyway,
+    // so routing through it would pass even with the Authorization rule removed.
+    @Test
+    void oauthBearerDetectsClaude() {
+        ServerHttpRequest request = MockServerHttpRequest.post("/v1/chat/completions")
+                .header("Authorization", "Bearer sk-ant-oat01-abc123")
+                .build();
+        assertThat(detector.detect(request)).isEqualTo(Provider.CLAUDE);
+    }
+
+    @Test
+    void ghpTokenStillWinsOverSkAntPrefixCheck() {
+        ServerHttpRequest request = MockServerHttpRequest.post("/v1/chat/completions")
+                .header("Authorization", "Bearer ghp_abc123")
+                .build();
+        assertThat(detector.detect(request)).isEqualTo(Provider.COPILOT);
+    }
+
     @Test
     void messagesPathDetectsClaude() {
         ServerHttpRequest request = MockServerHttpRequest.post("/v1/messages").build();
