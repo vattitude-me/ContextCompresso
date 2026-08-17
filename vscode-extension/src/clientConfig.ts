@@ -48,6 +48,13 @@ export function isCopilotConfigured(baseUrl: string): boolean {
  * something the extension does silently on activation.
  */
 export async function configureCopilot(baseUrl: string): Promise<ConfigureResult> {
+    if (!vscode.extensions.getExtension('GitHub.copilot')) {
+        return {
+            ok: false,
+            message: 'GitHub Copilot extension is not installed or enabled. Install it from the Extensions view, then try again.'
+        };
+    }
+
     const config = vscode.workspace.getConfiguration();
     const advanced = config.get<Record<string, unknown>>('github.copilot.advanced', {});
     try {
@@ -117,7 +124,11 @@ export async function disconnectClaudeCode(): Promise<ConfigureResult> {
     } catch (err) {
         return { ok: false, message: `Could not clear Claude Code settings: ${(err as Error).message}` };
     }
-    return { ok: true, message: 'Claude Code now talks to Anthropic directly again.' };
+    return {
+        ok: true,
+        message: 'Claude Code now talks to Anthropic directly again. Already-running Claude Code sessions ' +
+            'inherited the old setting at launch and need to be restarted to pick this up.'
+    };
 }
 
 /** Mirror of the above for Copilot, so both connections can be undone from the panel. */
