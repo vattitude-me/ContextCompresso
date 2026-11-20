@@ -2,7 +2,7 @@
   "name": "contextcompresso",
   "displayName": "ContextCompresso",
   "description": "Local token-usage dashboard and compression proxy for Copilot and Claude Code",
-  "version": "0.1.3",
+  "version": "0.2.0",
   "publisher": "contextcompresso",
   "repository": {
     "type": "git",
@@ -43,6 +43,34 @@
       {
         "command": "contextcompresso.openLogs",
         "title": "ContextCompresso: Open Proxy Logs"
+      },
+      {
+        "command": "contextcompresso.vatstash.reindex",
+        "title": "ContextCompresso: VatStash Reindex Workspace"
+      },
+      {
+        "command": "contextcompresso.vatstash.rebuild",
+        "title": "ContextCompresso: VatStash Rebuild Index"
+      },
+      {
+        "command": "contextcompresso.vatstash.clearIndex",
+        "title": "ContextCompresso: VatStash Clear Index"
+      },
+      {
+        "command": "contextcompresso.vatstash.search",
+        "title": "ContextCompresso: VatStash Search Code Index…"
+      },
+      {
+        "command": "contextcompresso.vatstash.exportMetrics",
+        "title": "ContextCompresso: VatStash Export Metrics…"
+      },
+      {
+        "command": "contextcompresso.vatstash.copyClaudeMcpCommand",
+        "title": "ContextCompresso: VatStash Copy Claude Code MCP Command"
+      },
+      {
+        "command": "contextcompresso.vatstash.showMenu",
+        "title": "ContextCompresso: VatStash Show Menu"
       }
     ],
     "configuration": {
@@ -67,14 +95,110 @@
           "type": "string",
           "default": "",
           "description": "Path to a Java 17+ executable. Leave empty to auto-detect (JAVA_HOME, then PATH)."
+        },
+        "contextcompresso.vatstash.enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Index workspace folders and provide VatStash code search (the vatstash_search tool, @vatstash, and the Claude Code MCP endpoint). The index stores a copy of your source under the extension's global storage."
+        },
+        "contextcompresso.vatstash.excludeGlobs": {
+          "type": "array",
+          "items": { "type": "string" },
+          "default": [],
+          "description": "Extra glob patterns to leave out of the VatStash index, on top of .gitignore and .vatstashignore. Example: **/generated/**"
+        },
+        "contextcompresso.vatstash.maxFileSizeKb": {
+          "type": "number",
+          "default": 512,
+          "description": "Files larger than this many kilobytes are not indexed."
+        },
+        "contextcompresso.vatstash.maxFiles": {
+          "type": "number",
+          "default": 50000,
+          "description": "Maximum number of files indexed per workspace folder."
+        },
+        "contextcompresso.vatstash.maxResults": {
+          "type": "number",
+          "default": 8,
+          "description": "Default number of snippets VatStash returns per search."
+        },
+        "contextcompresso.vatstash.maxResultTokens": {
+          "type": "number",
+          "default": 4000,
+          "description": "Token budget for the snippets returned by one VatStash search."
+        },
+        "contextcompresso.vatstash.showStatusBar": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show the VatStash index status in the status bar."
         }
       }
-    }
+    },
+    "languageModelTools": [
+      {
+        "name": "vatstash_search",
+        "toolReferenceName": "vatstash",
+        "displayName": "VatStash: Search Workspace Code",
+        "userDescription": "Search this workspace's local code index and return the most relevant snippets with file paths and line ranges.",
+        "modelDescription": "Searches a local keyword (BM25) index of the current workspace's source code and returns the most relevant snippets with file path, line range, enclosing symbol and code. Use it before opening whole files to find where something is defined, implemented, configured or called. Write the query as keywords and likely identifiers (class, method, field, config-key names) rather than a full sentence; set pathPrefix to scope to a module or directory. Results are snippets, not whole files: open a file only if the snippet is insufficient.",
+        "canBeReferencedInPrompt": true,
+        "icon": "$(search)",
+        "tags": [
+          "code",
+          "search",
+          "workspace"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "query": {
+              "type": "string",
+              "description": "Keywords and identifiers to search for"
+            },
+            "pathPrefix": {
+              "type": "string",
+              "description": "Optional workspace-relative directory to restrict results to"
+            },
+            "languages": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "Optional language ids, e.g. java, typescript"
+            },
+            "maxResults": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 20
+            }
+          },
+          "required": [
+            "query"
+          ]
+        }
+      }
+    ],
+    "chatParticipants": [
+      {
+        "id": "contextcompresso.vatstash",
+        "name": "vatstash",
+        "fullName": "VatStash",
+        "description": "Ask about this workspace using the local code index",
+        "isSticky": false,
+        "commands": [
+          {
+            "name": "search",
+            "description": "Show matching snippets without asking a model"
+          }
+        ]
+      }
+    ]
   },
   "scripts": {
     "compile": "tsc -p ./",
     "watch": "tsc -watch -p ./",
-    "package": "vsce package"
+    "package": "vsce package",
+    "test": "npm run compile && node --test out/test/"
   },
   "devDependencies": {
     "@types/node": "^20.0.0",

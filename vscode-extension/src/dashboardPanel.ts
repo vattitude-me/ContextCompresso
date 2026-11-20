@@ -7,6 +7,9 @@ import {
     ConfigureResult
 } from './clientConfig';
 import { BUILD_NUMBER } from './buildInfo';
+import { VatStashClient } from './vatstash/vatstashClient';
+import { WorkspaceSync, isVatStashEnabled } from './vatstash/workspaceSync';
+import { IndexStatus, MetricsSummary } from './vatstash/types';
 
 const POLL_MS_OPEN = 3000;
 
@@ -21,19 +24,26 @@ export class DashboardPanel {
     private pollHandle: ReturnType<typeof setInterval> | undefined;
     private disposables: vscode.Disposable[] = [];
 
-    static show(context: vscode.ExtensionContext, statsClient: StatsClient, proxyManager: ProxyManager, extensionVersion: string): void {
+    static show(
+        context: vscode.ExtensionContext,
+        statsClient: StatsClient,
+        proxyManager: ProxyManager,
+        extensionVersion: string,
+        vatstash?: { client: VatStashClient; sync: WorkspaceSync }
+    ): void {
         if (DashboardPanel.current) {
             DashboardPanel.current.panel.reveal();
             return;
         }
-        DashboardPanel.current = new DashboardPanel(context, statsClient, proxyManager, extensionVersion);
+        DashboardPanel.current = new DashboardPanel(context, statsClient, proxyManager, extensionVersion, vatstash);
     }
 
     private constructor(
         private readonly context: vscode.ExtensionContext,
         private readonly statsClient: StatsClient,
         private readonly proxyManager: ProxyManager,
-        private readonly extensionVersion: string
+        private readonly extensionVersion: string,
+        private readonly vatstash?: { client: VatStashClient; sync: WorkspaceSync }
     ) {
         this.panel = vscode.window.createWebviewPanel(
             'contextcompressoDashboard',
@@ -108,6 +118,15 @@ export class DashboardPanel {
                 return;
             case 'openLogs':
                 this.proxyManager.showLogs();
+                return;
+            case 'vatstashReindex':
+                await vscode.commands.executeCommand('contextcompresso.vatstash.reindex');
+                return;
+            case 'vatstashExport':
+                await vscode.commands.executeCommand('contextcompresso.vatstash.exportMetrics');
+                return;
+            case 'vatstashCopyMcp':
+                await vscode.commands.executeCommand('contextcompresso.vatstash.copyClaudeMcpCommand');
                 return;
         }
     }
@@ -205,10 +224,27 @@ export class DashboardPanel {
             proxy: proxyVersion?.version ?? null,
             proxyBuild: proxyVersion?.buildNumber ?? null
         };
+        const vatstash = await this.collectVatStash(proxyStatus.running);
         this.panel.webview.postMessage({
             type: 'update',
-            live, today, topCosts, proxyStatus, versions, clients, baseUrl
+            live, today, topCosts, proxyStatus, versions, clients, baseUrl, vatstash
         });
+    }
+
+    private async collectVatStash(proxyRunning: boolean): Promise<{ enabled: boolean; statuses: IndexStatus[]; summary: MetricsSummary | null } | null> {
+        if (!this.vatstash) {
+            return null;
+        }
+        const enabled = isVatStashEnabled();
+        if (!enabled || !proxyRunning) {
+            return { enabled, statuses: [], summary: null };
+        }
+        const result = await this.vatstash.client.metricsSummary(1);
+        return {
+            enabled,
+            statuses: this.vatstash.sync.getStatuses(),
+            summary: result.ok ? result.data : null
+        };
     }
 
     /** Surfaces action feedback inside the panel itself — a corner toast is too easy to miss. */
@@ -553,6 +589,54 @@ export class DashboardPanel {
       return html;
     }
 
+    function renderVatStash(vs) {
+      if (!vs) return '';
+      let html = '<h2>Code search (VatStash)</h2>';
+      if (!vs.enabled) {
+        return html + '<div class="card muted">VatStash is turned off. Enable <code>contextcompresso.vatstash.enabled</code> to index this workspace.</div>';
+      }
+      html += '<div class="card">';
+      if (!vs.statuses || vs.statuses.length === 0) {
+        html += '<div class="muted">No workspace folder is indexed yet.</div>';
+      } else {
+        const rows = vs.statuses.map((s) => {
+          const dot = s.state === 'ready' ? 'ok' : s.state === 'error' ? 'err' : 'busy';
+          const name = String(s.root).split(/[\\x5c/]/).filter(Boolean).pop() || s.root;
+          const prog = s.state === 'building' && s.progress && s.progress.total > 0
+            ? ' ' + s.progress.done + '/' + s.progress.total : '';
+          const updated = s.lastUpdateAt ? new Date(s.lastUpdateAt).toLocaleTimeString() : '—';
+          return '<tr><td title="' + esc(s.root) + '"><span class="dot ' + dot + '" style="display:inline-block;margin-right:7px"></span>' + esc(name) + '</td>' +
+            '<td class="muted">' + esc(s.state) + esc(prog) + '</td>' +
+            '<td class="num">' + fmt(s.filesIndexed) + ' files</td>' +
+            '<td class="num">' + fmt(s.chunksIndexed) + ' chunks</td>' +
+            '<td class="muted">' + esc(s.freshness) + '</td>' +
+            '<td class="muted">updated ' + esc(updated) + '</td></tr>' +
+            (s.lastError ? '<tr><td colspan="6" class="muted">' + esc(s.lastError) + '</td></tr>' : '') +
+            (s.truncated ? '<tr><td colspan="6" class="muted">File limit reached, some files are not indexed.</td></tr>' : '');
+        }).join('');
+        html += '<table><tbody>' + rows + '</tbody></table>';
+      }
+      html += '</div>';
+
+      const m = vs.summary;
+      if (m) {
+        const reduction = m.sourceFileTokens > 0 ? pct(m.estimatedReductionRatio) : '—';
+        html += '<div class="grid" style="margin-top:10px">' +
+          '<div class="card"><div class="stat-value">' + m.calls + '</div><div class="stat-label">Searches today</div></div>' +
+          '<div class="card"><div class="stat-value">' + fmt(m.returnedTokens) + '</div><div class="stat-label">Tokens returned</div></div>' +
+          '<div class="card"><div class="stat-value">' + fmt(m.sourceFileTokens) + '</div><div class="stat-label">Full-file estimate</div></div>' +
+          '<div class="card"><div class="stat-value">' + reduction + '</div><div class="stat-label">Estimated reduction</div></div>' +
+          '<div class="card"><div class="stat-value">' + (m.calls > 0 ? m.p50LatencyMs + ' ms' : '—') + '</div><div class="stat-label">Median latency</div></div>' +
+          '</div>' +
+          '<div class="stat-sub">' + esc(m.note) + '</div>';
+      }
+      html += '<div style="margin-top:12px;display:flex;gap:6px;flex-wrap:wrap">' +
+        '<button class="secondary" id="vs-reindex">Reindex</button>' +
+        '<button class="secondary" id="vs-export">Export metrics</button>' +
+        '<button class="secondary" id="vs-copy-mcp">Copy Claude MCP command</button></div>';
+      return html;
+    }
+
     function renderTopCosts(entries) {
       if (!entries || entries.length === 0) {
         return '<div class="muted">No requests recorded today.</div>';
@@ -623,6 +707,7 @@ export class DashboardPanel {
       html += '<h2>Largest requests today</h2><div class="card">' + renderTopCosts(data.topCosts) + '</div>';
       html += '<h2>Usage by hour</h2><div class="card">' + renderTrend(data.today ? data.today.byHour : []) + '</div>';
       html += '<h2>By model today</h2><div class="card">' + renderModelBreakdown(data.today ? data.today.byModel : []) + '</div>';
+      html += renderVatStash(data.vatstash);
 
       root.innerHTML = html;
       bind('wire-claude', 'configureClaudeCode');
@@ -630,6 +715,9 @@ export class DashboardPanel {
       bind('unwire-claude', 'disconnectClaudeCode');
       bind('unwire-copilot', 'disconnectCopilot');
       bind('copy-export', 'copyExport');
+      bind('vs-reindex', 'vatstashReindex');
+      bind('vs-export', 'vatstashExport');
+      bind('vs-copy-mcp', 'vatstashCopyMcp');
     }
 
     let noticeTimer = null;

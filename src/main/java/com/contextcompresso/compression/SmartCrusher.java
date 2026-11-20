@@ -5,6 +5,7 @@ import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.fasterxml.jackson.databind.node.TextNode;
 import com.contextcompresso.config.CompressionProperties;
+import com.contextcompresso.vatstash.VatStashMarker;
 import org.springframework.stereotype.Component;
 
 import java.util.Iterator;
@@ -39,6 +40,9 @@ public class SmartCrusher {
             return crushArray((ArrayNode) node);
         }
         if (node.isTextual()) {
+            if (VatStashMarker.isVatStashText(node.asText())) {
+                return node; // keep code indentation in VatStash results
+            }
             return new TextNode(collapseWhitespace(node.asText()));
         }
         return node;

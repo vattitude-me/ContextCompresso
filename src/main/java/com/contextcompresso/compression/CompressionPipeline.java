@@ -10,6 +10,7 @@ import com.contextcompresso.tokenizer.AnthropicEstimator;
 import com.contextcompresso.tokenizer.CharRatioEstimator;
 import com.contextcompresso.tokenizer.JtokkitEstimator;
 import com.contextcompresso.tokenizer.TokenEstimator;
+import com.contextcompresso.vatstash.VatStashMarker;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
@@ -159,6 +160,9 @@ public class CompressionPipeline {
         }
         if (content.isTextual()) {
             String original = content.asText();
+            if (VatStashMarker.isVatStashText(original)) {
+                return; // VatStash results are already token-budgeted
+            }
             String compressed = compressText(original, config, estimator);
             if (!compressed.equals(original)) {
                 recordCcr(requestId, messageIdx, "content", original, compressed, ccrEntries);
@@ -179,6 +183,9 @@ public class CompressionPipeline {
                 JsonNode textNode = blockObj.get("text");
                 if (textNode != null && textNode.isTextual()) {
                     String original = textNode.asText();
+                    if (VatStashMarker.isVatStashText(original)) {
+                        continue;
+                    }
                     String compressed = compressText(original, config, estimator);
                     if (!compressed.equals(original)) {
                         recordCcr(requestId, messageIdx, "content[" + i + "].text", original, compressed, ccrEntries);
@@ -211,6 +218,9 @@ public class CompressionPipeline {
 
         if (innerContent.isTextual()) {
             String original = innerContent.asText();
+            if (VatStashMarker.isVatStashText(original)) {
+                return;
+            }
             String compressed = toolResultCompactor.compact(original, threshold, estimator);
             if (!compressed.equals(original)) {
                 recordCcr(requestId, messageIdx, "content[" + blockIdx + "].content", original, compressed, ccrEntries);
@@ -227,6 +237,9 @@ public class CompressionPipeline {
                     continue;
                 }
                 String original = textNode.asText();
+                if (VatStashMarker.isVatStashText(original)) {
+                    continue;
+                }
                 String compressed = toolResultCompactor.compact(original, threshold, estimator);
                 if (!compressed.equals(original)) {
                     recordCcr(requestId, messageIdx,

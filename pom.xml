@@ -70,6 +70,20 @@
       <version>1.0.0</version>
     </dependency>
 
+    <!-- VatStash local code search: BM25 index (lucene-core only; no analysis/queryparser modules) -->
+    <dependency>
+      <groupId>org.apache.lucene</groupId>
+      <artifactId>lucene-core</artifactId>
+      <version>9.11.1</version>
+    </dependency>
+
+    <!-- VatStash Java chunking -->
+    <dependency>
+      <groupId>com.github.javaparser</groupId>
+      <artifactId>javaparser-core</artifactId>
+      <version>3.26.2</version>
+    </dependency>
+
     <!-- Caffeine cache for request deduplication -->
     <dependency>
       <groupId>com.github.ben-manes.caffeine</groupId>

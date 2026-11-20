@@ -4,6 +4,12 @@ import { StatsClient } from './statsClient';
 import { StatusBarController } from './statusBar';
 import { DashboardPanel } from './dashboardPanel';
 import { configureCopilot, configureClaudeCode, ConfigureResult } from './clientConfig';
+import { VatStashClient } from './vatstash/vatstashClient';
+import { WorkspaceSync } from './vatstash/workspaceSync';
+import { VatStashStatusBar } from './vatstash/vatstashStatusBar';
+import { registerSearchTool } from './vatstash/searchTool';
+import { registerChatParticipant } from './vatstash/chatParticipant';
+import { registerVatStashCommands } from './vatstash/commands';
 
 const STATUS_BAR_POLL_MS = 5000;
 
@@ -12,7 +18,15 @@ export function activate(context: vscode.ExtensionContext): void {
     const statsClient = new StatsClient(() => proxyManager.getBaseUrl());
     const statusBar = new StatusBarController();
 
-    context.subscriptions.push(proxyManager, statusBar);
+    const vatstashClient = new VatStashClient(() => proxyManager.getBaseUrl());
+    const vatstashSync = new WorkspaceSync(vatstashClient, proxyManager);
+    const vatstashStatusBar = new VatStashStatusBar(vatstashSync, proxyManager, vatstashClient);
+
+    context.subscriptions.push(proxyManager, statusBar, vatstashSync, vatstashStatusBar);
+
+    registerSearchTool(context, vatstashClient, vatstashSync);
+    registerChatParticipant(context, vatstashClient, vatstashSync);
+    registerVatStashCommands(context, vatstashClient, vatstashSync, proxyManager);
 
     proxyManager.onStatusChange((status) => statusBar.updateProxyStatus(status), null, context.subscriptions);
 
@@ -30,7 +44,7 @@ export function activate(context: vscode.ExtensionContext): void {
     context.subscriptions.push(
         vscode.commands.registerCommand('contextcompresso.showPanel', () => {
             const extensionVersion = context.extension.packageJSON.version as string;
-            DashboardPanel.show(context, statsClient, proxyManager, extensionVersion);
+            DashboardPanel.show(context, statsClient, proxyManager, extensionVersion, { client: vatstashClient, sync: vatstashSync });
         }),
         vscode.commands.registerCommand('contextcompresso.start', async () => {
             await proxyManager.start();

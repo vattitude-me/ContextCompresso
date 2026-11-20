@@ -48,7 +48,7 @@ export function isCopilotConfigured(baseUrl: string): boolean {
  * something the extension does silently on activation.
  */
 export async function configureCopilot(baseUrl: string): Promise<ConfigureResult> {
-    if (!vscode.extensions.getExtension('GitHub.copilot')) {
+    if (!vscode.extensions.getExtension('GitHub.copilot') && !vscode.extensions.getExtension('GitHub.copilot-chat')) {
         return {
             ok: false,
             message: 'GitHub Copilot extension is not installed or enabled. Install it from the Extensions view, then try again.'

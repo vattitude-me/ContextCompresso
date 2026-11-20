@@ -29,3 +29,29 @@ CREATE TABLE IF NOT EXISTS usage_records (
 
 CREATE INDEX IF NOT EXISTS idx_usage_created ON usage_records(created_at);
 CREATE INDEX IF NOT EXISTS idx_usage_session ON usage_records(session_key);
+
+CREATE TABLE IF NOT EXISTS vatstash_workspaces (
+    workspace_id  TEXT PRIMARY KEY,
+    root          TEXT NOT NULL,
+    settings_json TEXT,
+    registered_at INTEGER NOT NULL,
+    last_seen_at  INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS vatstash_search_events (
+    id                 TEXT PRIMARY KEY,
+    workspace_ids      TEXT NOT NULL,
+    client             TEXT NOT NULL,
+    query_chars        INTEGER NOT NULL,
+    query_hash         TEXT NOT NULL,
+    query_text         TEXT,
+    results            INTEGER NOT NULL,
+    files              INTEGER NOT NULL,
+    returned_tokens    INTEGER NOT NULL,
+    source_file_tokens INTEGER NOT NULL,
+    took_ms            INTEGER NOT NULL,
+    freshness          TEXT NOT NULL,
+    created_at         INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_vatstash_events_created ON vatstash_search_events(created_at);

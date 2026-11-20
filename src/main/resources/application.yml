@@ -95,6 +95,30 @@ contextcompresso:
     retention-days: 30
     max-captured-response-bytes: 65536
 
+  vatstash:
+    enabled: true
+    # blank = derive <parent of ccr.db-path>/vatstash
+    index-dir: ""
+    max-file-bytes: 524288
+    max-files-per-workspace: 50000
+    max-open-workspaces: 20
+    min-chunk-lines: 15
+    max-chunk-lines: 120
+    overlap-lines: 10
+    max-chunk-chars: 6000
+    commit-interval-ms: 10000
+    indexing-pause-ms: 2
+    reconcile-interval-minutes: 15
+    default-max-results: 8
+    max-results-cap: 30
+    default-max-tokens: 4000
+    max-tokens-cap: 16000
+    max-chunks-per-file: 3
+    metrics-retention-days: 90
+    store-query-text: false
+    mcp-enabled: true
+    mcp-auto-register: true
+
 management:
   endpoints:
     web:
